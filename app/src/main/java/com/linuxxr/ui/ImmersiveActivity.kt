@@ -232,6 +232,7 @@ class ImmersiveActivity : Activity() {
         super.onNewIntent(intent)
         // Debug hook (adb): am start -n com.linuxxr/.ui.ImmersiveActivity --ez toggle_dictation true
         if (BuildConfig.DEBUG && intent.getBooleanExtra("toggle_dictation", false)) toggleDictation()
+        if (BuildConfig.DEBUG) intent.getStringExtra("bench_wav")?.let { dictation.benchmark(java.io.File(it)) }
     }
 
     private fun typeText(text: String) {

@@ -44,6 +44,9 @@ JNIEXPORT jbyteArray JNICALL Java_com_linuxxr_ui_Dictation_nativeTranscribe(JNIE
     p.print_timestamps = false;
     p.print_special = false;
     p.suppress_blank = true;
+    // Whisper pads every input to 30 s (1500 encoder frames). Dictation utterances are a few
+    // seconds, so shrink the encoder context to the clip (+ margin): several times faster.
+    p.audio_ctx = std::min(1500, (int)(n / 16000.0 * 50) + 128);
 
     std::string text;
     if (whisper_full(ctx, p, samples, n) == 0) {

@@ -46,6 +46,11 @@ for i in $(seq 1 "$N"); do
   (
     export DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus"
     xsetroot -solid "$ROOT_KEY"
+    # Breeze Dark for GTK/xfwm4 widgets, KDE (Qt) apps follow kdeglobals.
+    xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Breeze-Dark 2>/dev/null
+    xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s breeze-dark 2>/dev/null
+    xfconf-query -c xfwm4 -p /general/theme -n -t string -s Breeze 2>/dev/null
+    export QT_QPA_PLATFORMTHEME=kde XDG_CURRENT_DESKTOP=KDE
     xfsettingsd --replace &
     # No compositor: xfwm4's compositor paints the root black, hiding the transparency key.
     xfwm4 --replace --compositor=off &

@@ -137,9 +137,17 @@ class Dictation(
         synchronized(Companion) {
             if (whisperCtx != 0L) return whisperCtx
             val file = File(context.filesDir, "models/$MODEL_NAME")
-            if (!file.isFile || sha256(file) != MODEL_SHA256) download(file)
+            // Verified once; the stamp avoids re-hashing the model on every start.
+            val stamp = File(file.path + ".sha256")
+            if (!file.isFile || !stamp.isFile || stamp.readText() != MODEL_SHA256) {
+                if (!file.isFile || sha256(file) != MODEL_SHA256) download(file)
+                stamp.writeText(MODEL_SHA256)
+            }
+            File(context.filesDir, "models").listFiles()?.filter { !it.name.startsWith(MODEL_NAME) }?.forEach { it.delete() }
             status("Cargando modelo de voz…")
+            val t0 = System.nanoTime()
             whisperCtx = nativeInit(file.path)
+            Log.i(TAG, "model loaded in ${(System.nanoTime() - t0) / 1_000_000} ms")
             if (whisperCtx == 0L) throw IOException("no se pudo cargar el modelo Whisper")
             return whisperCtx
         }
@@ -262,6 +270,24 @@ class Dictation(
         }
     }
 
+    /** Debug: transcribes a 16 kHz mono 16-bit WAV and logs the time taken. */
+    fun benchmark(wav: File) {
+        worker.execute {
+            try {
+                val ctx = loadModel()
+                val bytes = wav.readBytes()
+                val pcm = FloatArray((bytes.size - 44) / 2) {
+                    ((bytes[44 + 2 * it].toInt() and 0xff) or (bytes[45 + 2 * it].toInt() shl 8)).toShort() / 32768f
+                }
+                val t0 = System.nanoTime()
+                val text = String(nativeTranscribe(ctx, pcm, language), Charsets.UTF_8)
+                Log.i(TAG, "benchmark ${pcm.size / 16} ms audio -> ${(System.nanoTime() - t0) / 1_000_000} ms: $text")
+            } catch (e: Exception) {
+                Log.e(TAG, "benchmark failed", e)
+            }
+        }
+    }
+
     /** Drops Whisper's non-speech annotations ("[Música]", "(risas)") and silence hallucinations. */
     private fun clean(raw: String): String {
         val t = raw.replace(Regex("\\[[^]]*]|\\([^)]*\\)|\\*[^*]*\\*"), "").replace(Regex("\\s+"), " ").trim()
@@ -271,10 +297,11 @@ class Dictation(
 
     companion object {
         private const val TAG = "LinuxXR-Dictation"
-        // Multilingual Whisper "small", 5-bit quantised (~190 MB): good Spanish accuracy on-device.
-        private const val MODEL_NAME = "ggml-small-q5_1.bin"
-        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
-        private const val MODEL_SHA256 = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
+        // Multilingual Whisper "base", 5-bit quantised (~57 MB): ~4x faster than "small" on the
+        // Quest 3 CPU, which matters more for dictation than the last bit of accuracy.
+        private const val MODEL_NAME = "ggml-base-q5_1.bin"
+        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin"
+        private const val MODEL_SHA256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"
         private val HALLUCINATIONS = listOf("amara.org", "subtítulos realizados", "gracias por ver el video")
 
         @Volatile private var whisperCtx = 0L

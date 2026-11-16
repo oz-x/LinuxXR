@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Desktop panels: transparent window so Horizon OS passthrough shows through Plasma's
+         (key-coloured) desktop background; only windows and panels are drawn. -->
+    <style name="Theme.LinuxXR.TransparentDesktop" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowBackgroundFallback">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

@@ -49,7 +49,7 @@ class DesktopActivity : Activity() {
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(16, 16, 20))
+            setBackgroundColor(Color.TRANSPARENT)
             addView(keyBar(), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(desktop, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
@@ -81,7 +81,7 @@ class DesktopActivity : Activity() {
         override fun onServerCutText(text: String) {
             main.post { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("LinuxXR", text)) }
         }
-    }).start()
+    }, transparentKey = ImmersiveActivity.ROOT_KEY).start()
 
     private fun setStatus(text: String) = main.post {
         status.text = text
@@ -124,7 +124,10 @@ class DesktopActivity : Activity() {
             if (!text.isNullOrEmpty()) desktop.typeText(text)
         }
         bar.addView(status)
-        return HorizontalScrollView(this).apply { addView(bar) }
+        return HorizontalScrollView(this).apply {
+            setBackgroundColor(Color.argb(210, 16, 16, 20))
+            addView(bar)
+        }
     }
 
     private fun refreshKeyBar() {

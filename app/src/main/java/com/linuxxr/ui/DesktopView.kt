@@ -40,6 +40,11 @@ class DesktopView(context: Context) : GLSurfaceView(context) {
 
     init {
         setEGLContextClientVersion(3)
+        // RGBA surface composited with alpha: key-coloured desktop pixels are alpha 0, so the
+        // panel is see-through there (passthrough behind it in Horizon OS).
+        setEGLConfigChooser(8, 8, 8, 8, 0, 0)
+        holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+        setZOrderOnTop(true)
         setRenderer(renderer)
         renderMode = RENDERMODE_WHEN_DIRTY
         isFocusable = true
@@ -231,7 +236,7 @@ class DesktopView(context: Context) : GLSurfaceView(context) {
 
         override fun onDrawFrame(gl: GL10?) {
             GLES30.glViewport(0, 0, surfaceW, surfaceH)
-            GLES30.glClearColor(0.05f, 0.05f, 0.07f, 1f)
+            GLES30.glClearColor(0f, 0f, 0f, 0f)
             GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
             val c = client ?: return
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture)
@@ -289,7 +294,7 @@ class DesktopView(context: Context) : GLSurfaceView(context) {
                 in vec2 vUv;
                 uniform sampler2D uTex;
                 out vec4 color;
-                void main() { color = vec4(texture(uTex, vUv).rgb, 1.0); }
+                void main() { color = texture(uTex, vUv); }  // premultiplied: key pixels are (0,0,0,0)
             """.trimIndent())
             val p = GLES30.glCreateProgram()
             GLES30.glAttachShader(p, vs)

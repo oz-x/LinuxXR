@@ -59,6 +59,7 @@
         <activity
             android:name=".ui.DesktopActivity"
             android:exported="false"
+            android:theme="@style/Theme.LinuxXR.TransparentDesktop"
             android:resizeableActivity="true"
             android:documentLaunchMode="intoExisting"
             android:windowSoftInputMode="adjustResize"

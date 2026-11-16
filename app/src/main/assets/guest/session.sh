@@ -20,6 +20,17 @@ grep -q '^NoExtract.*usr/bin/bwrap' /etc/pacman.conf || sed -i '/^\[options\]/a 
 # Agent CLIs (claude, omp) install to ~/.local/bin; terminals start non-login shells.
 grep -qs 'HOME/.local/bin' /root/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 export PATH="/root/.local/bin:$PATH"
+# Breeze Dark for KDE apps. Without Plasma nothing expands the colour scheme name, so the
+# scheme itself goes into kdeglobals (rewritten each start; cheap and self-healing).
+if [ -r /usr/share/color-schemes/BreezeDark.colors ]; then
+  { cat /usr/share/color-schemes/BreezeDark.colors
+    printf '\n[General]\nColorScheme=BreezeDark\n[Icons]\nTheme=breeze-dark\n[KDE]\nLookAndFeelPackage=org.kde.breezedark.desktop\n'
+  } > /root/.config/kdeglobals
+fi
+# Qt/KDE apps take the KDE platform theme (plasma-integration) and Breeze style everywhere:
+# panel launchers, terminals and agent-started apps alike.
+export QT_QPA_PLATFORMTHEME=kde QT_STYLE_OVERRIDE=Breeze XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6
+printf 'QT_QPA_PLATFORMTHEME=kde\nQT_STYLE_OVERRIDE=Breeze\nXDG_CURRENT_DESKTOP=KDE\nKDE_SESSION_VERSION=6\n' > /etc/environment
 dbus-uuidgen --ensure 2>/dev/null || true   # xfconf/dbus need a machine-id
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null; wait; }
@@ -50,7 +61,9 @@ for i in $(seq 1 "$N"); do
     xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Breeze-Dark 2>/dev/null
     xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s breeze-dark 2>/dev/null
     xfconf-query -c xfwm4 -p /general/theme -n -t string -s Breeze 2>/dev/null
-    export QT_QPA_PLATFORMTHEME=kde XDG_CURRENT_DESKTOP=KDE
+    # LinuxXR changes the monitor layout (VR ring / panel size): don't pop up the display dialog.
+    xfconf-query -c displays -p /Notify -n -t int -s 0 2>/dev/null
+    xfconf-query -c displays -p /AutoEnableProfiles -n -t bool -s false 2>/dev/null
     xfsettingsd --replace &
     # No compositor: xfwm4's compositor paints the root black, hiding the transparency key.
     xfwm4 --replace --compositor=off &

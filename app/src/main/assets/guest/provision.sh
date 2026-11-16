@@ -4,6 +4,7 @@ set -euo pipefail
 MARKER=/var/lib/linuxxr/provisioned-v1
 KDE_MARKER=/var/lib/linuxxr/kde-v1
 
+
 # KDE apps and look on top of the X11 session (Plasma 6.8 on Arch ARM is Wayland-only, and
 # LinuxXR's 360° VR desktop, transparency and agent control are X11-based).
 install_kde() {
@@ -13,14 +14,6 @@ install_kde() {
   mkdir -p /root/.config/xfce4
   # KDE apps as defaults for the panel launchers and "open terminal/file manager".
   printf 'TerminalEmulator=konsole\nFileManager=dolphin\n' > /root/.config/xfce4/helpers.rc
-  cat > /root/.config/kdeglobals <<'KDE'
-[General]
-ColorScheme=BreezeDark
-[Icons]
-Theme=breeze-dark
-[KDE]
-LookAndFeelPackage=org.kde.breezedark.desktop
-KDE
   touch "$KDE_MARKER"
 }
 

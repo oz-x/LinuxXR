@@ -2,7 +2,11 @@ package com.linuxxr.ui
 
 import android.content.Context
 import android.opengl.GLES30
+import android.graphics.SurfaceTexture
+import android.opengl.EGL14
+import android.opengl.EGLExt
 import android.opengl.GLSurfaceView
+import android.view.TextureView
 import android.text.InputType
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -21,7 +25,7 @@ import javax.microedition.khronos.opengles.GL10
  * Shows one remote X display. The framebuffer is uploaded to a GL texture (only the dirty
  * region per frame) and drawn letterboxed; input is mapped back to framebuffer pixels.
  */
-class DesktopView(context: Context) : GLSurfaceView(context) {
+class DesktopView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
 
     @Volatile var client: RfbClient? = null
         set(value) { field = value; requestRender() }
@@ -38,17 +42,95 @@ class DesktopView(context: Context) : GLSurfaceView(context) {
     @Volatile private var viewport = intArrayOf(0, 0, 1, 1)
     @Volatile private var fbSize = intArrayOf(1, 1)
 
+    private var glThread: GlThread? = null
+
     init {
-        setEGLContextClientVersion(3)
-        // RGBA surface composited with alpha: key-coloured desktop pixels are alpha 0, so the
-        // panel is see-through there (passthrough behind it in Horizon OS).
-        setEGLConfigChooser(8, 8, 8, 8, 0, 0)
-        holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
-        setZOrderOnTop(true)
-        setRenderer(renderer)
-        renderMode = RENDERMODE_WHEN_DIRTY
+        // A TextureView (not SurfaceView) is composited inside the window with alpha, so the
+        // key-coloured desktop pixels (alpha 0) let Horizon OS passthrough show through. Horizon
+        // promotes SurfaceViews to their own opaque layer, which showed black instead.
+        isOpaque = false
+        surfaceTextureListener = this
         isFocusable = true
         isFocusableInTouchMode = true
+    }
+
+    fun requestRender() {
+        glThread?.requestRender()
+    }
+
+    fun onResume() = Unit
+    fun onPause() = Unit
+
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        glThread = GlThread(surface, width, height).also { it.start() }
+    }
+
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        glThread?.resize(width, height)
+    }
+
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        glThread?.quit()
+        glThread = null
+        return true
+    }
+
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+
+    /** Minimal on-demand GL ES 3 render loop for the TextureView. */
+    private inner class GlThread(private val texture: SurfaceTexture, private var w: Int, private var h: Int) :
+        Thread("desktop-gl") {
+        private val lock = Object()
+        private var dirty = true
+        private var resized = true
+        private var running = true
+
+        fun requestRender() = synchronized(lock) { dirty = true; lock.notifyAll() }
+        fun resize(width: Int, height: Int) = synchronized(lock) { w = width; h = height; resized = true; dirty = true; lock.notifyAll() }
+        fun quit() {
+            synchronized(lock) { running = false; lock.notifyAll() }
+            join(1000)
+        }
+
+        override fun run() {
+            val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            val version = IntArray(2)
+            EGL14.eglInitialize(display, version, 0, version, 1)
+            val attribs = intArrayOf(EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR, EGL14.EGL_NONE)
+            val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
+            val num = IntArray(1)
+            EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, num, 0)
+            val ctx = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
+                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE), 0)
+            val surface = EGL14.eglCreateWindowSurface(display, configs[0], texture, intArrayOf(EGL14.EGL_NONE), 0)
+            EGL14.eglMakeCurrent(display, surface, surface, ctx)
+            renderer.onSurfaceCreated(null, null)
+            try {
+                while (true) {
+                    var doResize: Boolean
+                    var width: Int
+                    var height: Int
+                    synchronized(lock) {
+                        while (running && !dirty) lock.wait()
+                        if (!running) return
+                        dirty = false
+                        doResize = resized
+                        resized = false
+                        width = w
+                        height = h
+                    }
+                    if (doResize) renderer.onSurfaceChanged(null, width, height)
+                    renderer.onDrawFrame(null)
+                    EGL14.eglSwapBuffers(display, surface)
+                }
+            } finally {
+                EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                EGL14.eglDestroySurface(display, surface)
+                EGL14.eglDestroyContext(display, ctx)
+                EGL14.eglTerminate(display)
+            }
+        }
     }
 
     // ---- input ----------------------------------------------------------------

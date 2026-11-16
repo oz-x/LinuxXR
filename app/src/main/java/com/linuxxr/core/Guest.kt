@@ -7,9 +7,8 @@ import java.io.File
 import java.net.Inet4Address
 
 /**
- * Pinned Debian 13 "trixie" rootfs (proot-distro build, aarch64). Debian rather than Arch because
- * it still ships KDE Plasma's X11 session; Plasma on Arch is Wayland-only, which needs a GPU
- * DRM/GBM device Android does not give apps.
+ * Pinned Debian 13 "trixie" rootfs (proot-distro build, aarch64), with the i3 tiling window
+ * manager on X11 (see provision.sh).
  */
 object Rootfs {
     const val ID = "debian-trixie"
@@ -104,6 +103,7 @@ class Guest(private val context: Context) {
             "provision.sh" to "usr/local/lib/linuxxr/provision.sh",
             "session.sh" to "usr/local/lib/linuxxr/session.sh",
             "agentd.py" to "usr/local/lib/linuxxr/agentd.py",
+            "i3.config" to "usr/local/lib/linuxxr/i3.config",
             "linuxxr" to "usr/local/bin/linuxxr",
             "linuxxr-gpu.sh" to "etc/profile.d/linuxxr-gpu.sh",
         )

@@ -17,47 +17,29 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 grep -qs 'HOME/.local/bin' /root/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 export PATH="/root/.local/bin:$PATH"
 
-# KDE Plasma settings for LinuxXR (written every start; Plasma keeps everything else).
-mkdir -p /root/.config
-kwc() { kwriteconfig6 --file "$1" --group "$2" --key "$3" "$4"; }
-kwc kwinrc Compositing Enabled false            # software GL compositing would burn the CPU
-kwc kwinrc MouseBindings CommandAllKey Alt       # grip in VR = Alt+drag moves windows
-kwc ksmserverrc General loginMode emptySession
-kwc kscreenlockerrc Daemon Autolock false
-kwc kscreenlockerrc Daemon LockOnResume false
-kwc kdeglobals KDE LookAndFeelPackage org.kde.breezedark.desktop
-dbus-uuidgen --ensure 2>/dev/null || true   # dbus/KDE need a machine-id
+# i3 config from LinuxXR (personal additions: ~/.config/i3/local.conf).
+mkdir -p /root/.config/i3 /root/.config/gtk-3.0
+cp /usr/local/lib/linuxxr/i3.config /root/.config/i3/config
+touch /root/.config/i3/local.conf
+# Dark GTK theme and icons for the terminal, Thunar and rofi.
+printf '[Settings]\ngtk-theme-name=Adwaita-dark\ngtk-icon-theme-name=Papirus-Dark\ngtk-application-prefer-dark-theme=1\n' \
+  > /root/.config/gtk-3.0/settings.ini
+[ -e /root/.config/rofi/config.rasi ] || { mkdir -p /root/.config/rofi; echo '@theme "Arc-Dark"' > /root/.config/rofi/config.rasi; }
+dbus-uuidgen --ensure 2>/dev/null || true   # dbus needs a machine-id
 
-# Plasma's desktop (wallpaper) is painted with the transparency key colour so that, in VR, only
-# windows and panels float over passthrough. Plasma creates one desktop per monitor, and LinuxXR
-# changes the monitor layout (360° ring in VR, panel size otherwise), so re-apply on changes.
-KEY_RGB="1,254,2"
-plasma_key_watcher() {
+# The root window is painted with the VR transparency key, but Xvnc resets it to black when
+# the screen is resized (VR ring / panel size), so repaint it after every layout change.
+root_key_watcher() {
   local last=""
-  for _ in $(seq 120); do
-    dbus-send --session --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus \
-      org.freedesktop.DBus.NameHasOwner string:org.kde.plasmashell 2>/dev/null | grep -q true && break
-    sleep 1
-  done
   while true; do
     local now
     now=$(xrandr --listmonitors 2>/dev/null | md5sum)
     if [ "$now" != "$last" ]; then
-      sleep 2   # let plasmashell create containments for new monitors
-      dbus-send --session --dest=org.kde.plasmashell --type=method_call /PlasmaShell \
-        org.kde.PlasmaShell.evaluateScript "string:desktops().forEach(function(d){d.wallpaperPlugin='org.kde.color';d.currentConfigGroup=['Wallpaper','org.kde.color','General'];d.writeConfig('Color','$KEY_RGB');d.reloadConfig();})" \
-        && last="$now"
-      # Breeze Dark once, after plasmashell has its desktops (earlier it is silently ignored).
-      if [ -n "$last" ] && [ ! -e /var/lib/linuxxr/breezedark-applied-v2 ]; then
-        plasma-apply-lookandfeel -a org.kde.breezedark.desktop >/dev/null 2>&1 && touch /var/lib/linuxxr/breezedark-applied-v2
-      fi
+      xsetroot -solid "$ROOT_KEY" && last="$now"
     fi
-    sleep 3
+    sleep 2
   done
 }
-pids=()
-cleanup() { kill "${pids[@]}" 2>/dev/null; wait; }
-trap cleanup EXIT TERM INT
 
 for i in $(seq 1 "$N"); do
   rm -f "/tmp/.X$i-lock" "/tmp/.X11-unix/X$i" "$RUN/display-$i.sock"
@@ -78,8 +60,8 @@ for i in $(seq 1 "$N"); do
   (
     export DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus"
     xsetroot -solid "$ROOT_KEY"
-    plasma_key_watcher &
-    exec startplasma-x11
+    root_key_watcher &
+    exec i3
   ) > "$RUN/desktop-$i.log" 2>&1 &
   pids+=($!)
   echo "[linuxxr] display :$i listo ($RUN/display-$i.sock)"

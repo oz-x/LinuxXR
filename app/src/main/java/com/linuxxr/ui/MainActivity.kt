@@ -90,7 +90,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad, pad, pad)
             setBackgroundColor(Color.rgb(18, 18, 24))
             addView(text(24f, bold = true).apply { this.text = "LinuxXR" })
-            addView(text(14f).apply { this.text = "Debian + KDE Plasma con GPU para agentes de IA · Meta Quest 3" })
+            addView(text(14f).apply { this.text = "Debian + i3 con GPU para agentes de IA · Meta Quest 3" })
             addView(status)
             addView(progress, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(displayRow)
@@ -157,7 +157,7 @@ class MainActivity : Activity() {
         desktops.removeAllViews()
         when (state) {
             SessionState.Stopped -> {
-                status.text = if (Guest(this).isInstalled) "Detenido" else "Debian + KDE Plasma no instalado (se descargarán ~35 MB y luego paquetes)"
+                status.text = if (Guest(this).isInstalled) "Detenido" else "Debian + i3 no instalado (se descargarán ~35 MB y luego paquetes)"
                 startStop.text = "Iniciar Linux"
             }
             is SessionState.Working -> {

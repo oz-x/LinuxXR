@@ -1,9 +1,8 @@
 #!/bin/bash
 # LinuxXR first-boot provisioning for Debian 13 "trixie" (runs inside PRoot as fake root).
-# Debian is used because it still ships KDE Plasma with its X11 session (KWin X11): Plasma on
-# Arch is Wayland-only, and Wayland compositors need a DRM/GBM GPU Android does not expose.
+# Desktop: i3 tiling window manager on X11 (no compositor needed, light on PRoot's CPU).
 set -euo pipefail
-MARKER=/var/lib/linuxxr/provisioned-debian-v1
+MARKER=/var/lib/linuxxr/provisioned-debian-i3-v1
 [ -e "$MARKER" ] && { echo "[linuxxr] ya aprovisionado"; exit 0; }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -15,10 +14,19 @@ echo "[linuxxr] actualizando Debian"
 apt-get update
 apt-get -y full-upgrade
 
-echo "[linuxxr] instalando KDE Plasma (X11), escritorio remoto y herramientas de agentes"
+# Earlier LinuxXR versions installed KDE Plasma: remove it.
+if dpkg -s plasma-workspace >/dev/null 2>&1; then
+  echo "[linuxxr] quitando KDE Plasma"
+  apt-get -y purge 'plasma-*' 'kwin-*' kde-plasma-desktop konsole dolphin kate ark gwenview okular \
+    kde-spectacle systemsettings plasma-integration 'kde-*' sddm 2>/dev/null || true
+  apt-get -y autoremove --purge
+  rm -rf /root/.config/plasma* /root/.config/kwin* /root/.config/kde* /root/.local/share/plasma* /var/lib/linuxxr/breezedark-applied*
+fi
+
+echo "[linuxxr] instalando i3 (tiling), escritorio remoto y herramientas de agentes"
 apt-get -y install \
-  kde-plasma-desktop plasma-workspace kwin-x11 plasma-integration breeze breeze-gtk-theme \
-  konsole dolphin kate ark gwenview okular kde-spectacle systemsettings \
+  i3-wm i3status rofi dunst xfce4-terminal thunar adwaita-icon-theme papirus-icon-theme \
+  gnome-themes-extra \
   tigervnc-standalone-server tigervnc-tools dbus-x11 x11-xserver-utils x11-utils \
   xdotool scrot xclip \
   python3 python3-pil \

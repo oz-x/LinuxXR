@@ -1,6 +1,6 @@
 # LinuxXR
 
-Debian 13 con **KDE Plasma** dentro de una app para **Meta Quest 3**, con aceleración gráfica, pensada para trabajar con **agentes de IA en la nube**. No está pensada para juegos.
+Debian 13 con el gestor de ventanas en mosaico **i3** dentro de una app para **Meta Quest 3**, con aceleración gráfica, pensada para trabajar con **agentes de IA en la nube**. No está pensada para juegos.
 
 ```mermaid
 flowchart LR
@@ -10,9 +10,9 @@ flowchart LR
     P2["DesktopActivity :N"]
     VR["ImmersiveActivity<br/>OpenXR estéreo 3D"]
     SVC["SessionService<br/>(foreground)"]
-    subgraph Guest["Debian 13 + KDE Plasma X11 (PRoot, sin root)"]
-      X1["Xvnc :1 + Plasma"]
-      XN["Xvnc :N + Plasma"]
+    subgraph Guest["Debian 13 + i3 (PRoot, sin root)"]
+      X1["Xvnc :1 + i3"]
+      XN["Xvnc :N + i3"]
       AG["agentd · MCP<br/>127.0.0.1:7777"]
       CLI["Claude Code / Codex / Gemini CLI<br/>Chromium, Node, Python"]
       GPU["Mesa Turnip (KGSL) + Zink<br/>→ Adreno 740"]
@@ -31,11 +31,11 @@ flowchart LR
 
 | Pieza | Implementación |
 |---|---|
-| Linux | Rootfs de Debian 13 «trixie» (aarch64) fijado por SHA-256 (`proot-distro` v4.29.0). Se descarga en el primer arranque (~35 MB). Debian y no Arch porque todavía trae la sesión **X11** de Plasma: Plasma en Arch (6.8) es solo Wayland, y KWin Wayland necesita una GPU DRM/GBM que Android no da a las apps. |
+| Linux | Rootfs de Debian 13 «trixie» (aarch64) fijado por SHA-256 (`proot-distro` v4.29.0). Se descarga en el primer arranque (~35 MB). |
 | Emulación | [PRoot](https://github.com/termux/proot) (fork de Termux) compilado con el NDK desde un commit fijado. Se empaqueta como `libproot.so` y `libproot-loader.so`, porque desde API 29 una app no puede ejecutar binarios desde sus datos. Sin root y sin KVM. |
-| Escritorios | TigerVNC `Xvnc` con **KDE Plasma completo** (`startplasma-x11`: KWin X11, plasmashell, Breeze Dark, Konsole, Dolphin, Kate…), uno por display (1–4). KWin sin compositing (no hay GPU para él) y Alt+arrastrar para mover ventanas. Cada uno escucha en `/run/linuxxr/display-N.sock`, un socket Unix privado de la app: ninguna otra app del Quest puede conectarse. |
+| Escritorios | TigerVNC `Xvnc` con **i3** (tiling, con huecos entre ventanas), i3bar, rofi (`Super+D`), xfce4-terminal (`Super+Enter`) y Thunar (`Super+E`), tema oscuro; uno por display (1–4). Alt+arrastrar mueve ventanas (el grip en VR). Configuración propia en `~/.config/i3/local.conf`. Cada uno escucha en `/run/linuxxr/display-N.sock`, un socket Unix privado de la app: ninguna otra app del Quest puede conectarse. |
 | Paneles | `DesktopActivity`: cliente RFB propio (Raw, CopyRect, ExtendedDesktopSize) que dibuja con OpenGL ES 3 y solo sube a la textura la zona que cambió. El escritorio remoto se redimensiona al tamaño del panel para que cada píxel sea 1:1. |
-| VR inmersivo | `ImmersiveActivity` + `xr_main.cpp` (OpenXR, loader Khronos 1.1.65), estéreo 3D con seguimiento de cabeza. El display `:1` se convierte en un **escritorio de 360°**: 6 monitores RandR de 1440×1200 (8640 px = 24 px/°, un píxel del escritorio por píxel de la pantalla del Quest 3) envueltos a tu alrededor a 1,8 m. Las ventanas se colocan y maximizan en cualquier dirección. Los displays 2–4 flotan encima. Por defecto el fondo es **passthrough**: el fondo de Plasma (en cada monitor) se pinta con un color clave que se vuelve transparente, así que solo flotan las ventanas y paneles en tu habitación. |
+| VR inmersivo | `ImmersiveActivity` + `xr_main.cpp` (OpenXR, loader Khronos 1.1.65), estéreo 3D con seguimiento de cabeza. El display `:1` se convierte en un **escritorio de 360°**: 6 monitores RandR de 1440×1200 (8640 px = 24 px/°, un píxel del escritorio por píxel de la pantalla del Quest 3) envueltos a tu alrededor a 1,8 m. Las ventanas se colocan y maximizan en cualquier dirección. Los displays 2–4 flotan encima. Por defecto el fondo es **passthrough**: la ventana raíz de X se pinta con un color clave que se vuelve transparente, así que solo flotan las ventanas (y los huecos entre ellas dejan ver la habitación). |
 | Nitidez | Cada columna del escritorio es una capa `XR_KHR_composition_layer_cylinder` que el compositor de Meta muestrea directamente, sin pasar por el buffer de ojo (que tiene resolución dinámica y foveated), con mipmaps y `XR_FB_composition_layer_settings` (supersampling + sharpening). |
 | Entrada | Rayo y gatillo del mando o pinch de las manos → ratón. Joystick → rueda. Teclado del sistema o teclado Bluetooth → keysyms X11. La barra superior tiene Esc, Tab, Ctrl, Alt, Super y Shift (fijos hasta la siguiente tecla), flechas, clic derecho y pegar. |
 | GPU | `linuxxr gpu build` compila Mesa 26.2.7 dentro del Quest: Turnip con KMD **KGSL** (`/dev/kgsl-3d0`) y Zink para OpenGL. Se instala en `/opt/linuxxr/mesa`, aparte del Mesa de Debian, así que `apt upgrade` no lo pisa. |
@@ -59,7 +59,7 @@ El APK queda en *Biblioteca → Fuentes desconocidas* del Quest.
 
 ## Uso
 
-1. Abre **LinuxXR**, elige cuántos escritorios quieres y pulsa **Iniciar Linux**. La primera vez descarga el rootfs y ejecuta `provision.sh`, que hace `apt full-upgrade` e instala KDE Plasma, TigerVNC, Chromium, Node, Python, xdotool, Claude Code y oh my pi (omp). Tarda varios minutos.
+1. Abre **LinuxXR**, elige cuántos escritorios quieres y pulsa **Iniciar Linux**. La primera vez descarga el rootfs y ejecuta `provision.sh`, que hace `apt full-upgrade` e instala i3, TigerVNC, Chromium, Node, Python, xdotool, Claude Code y oh my pi (omp). Tarda varios minutos.
 2. Elige cómo ver los escritorios:
    - **Modo VR inmersivo (3D)**: todos los escritorios a tu alrededor, en estéreo.
    - **Abrir escritorio :N**: cada escritorio es un panel 2D distinto de Horizon OS.

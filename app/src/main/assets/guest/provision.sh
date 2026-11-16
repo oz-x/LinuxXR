@@ -33,7 +33,7 @@ fi
 echo "[linuxxr] instalando XFCE, escritorio remoto y herramientas de agentes"
 apt-get -y install \
   xfwm4 xfce4-panel xfce4-settings xfconf xfce4-whiskermenu-plugin xfce4-terminal thunar \
-  adwaita-icon-theme papirus-icon-theme gnome-themes-extra \
+  adwaita-icon-theme papirus-icon-theme gnome-themes-extra librsvg2-common \
   tigervnc-standalone-server tigervnc-tools dbus-x11 x11-xserver-utils x11-utils \
   xdotool scrot xclip \
   python3 python3-pil \

@@ -64,7 +64,7 @@ class SessionService : Service() {
                 RootfsInstaller(guest, cacheDir).install { msg, fraction -> _state.value = SessionState.Working(msg, fraction) }
             }
             guest.prepare()
-            _state.value = SessionState.Working("Aprovisionando Debian + i3 (primera vez: varios minutos)…")
+            _state.value = SessionState.Working("Aprovisionando Debian + XFCE (primera vez: varios minutos)…")
             val provisionCode = runGuest(guest, "/bin/bash", "/usr/local/lib/linuxxr/provision.sh")
             if (provisionCode != 0) throw IllegalStateException("El aprovisionamiento falló (código $provisionCode). Revisa el log.")
 

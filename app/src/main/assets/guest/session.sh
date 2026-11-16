@@ -17,14 +17,10 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 grep -qs 'HOME/.local/bin' /root/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 export PATH="/root/.local/bin:$PATH"
 
-# i3 config from LinuxXR (personal additions: ~/.config/i3/local.conf).
-mkdir -p /root/.config/i3 /root/.config/gtk-3.0
-cp /usr/local/lib/linuxxr/i3.config /root/.config/i3/config
-touch /root/.config/i3/local.conf
-# Dark GTK theme and icons for the terminal, Thunar and rofi.
+# Dark GTK theme and icons (XFCE, terminal, Thunar).
+mkdir -p /root/.config/gtk-3.0
 printf '[Settings]\ngtk-theme-name=Adwaita-dark\ngtk-icon-theme-name=Papirus-Dark\ngtk-application-prefer-dark-theme=1\n' \
   > /root/.config/gtk-3.0/settings.ini
-[ -e /root/.config/rofi/config.rasi ] || { mkdir -p /root/.config/rofi; echo '@theme "Arc-Dark"' > /root/.config/rofi/config.rasi; }
 dbus-uuidgen --ensure 2>/dev/null || true   # dbus needs a machine-id
 
 # The root window is painted with the VR transparency key, but Xvnc resets it to black when
@@ -61,7 +57,17 @@ for i in $(seq 1 "$N"); do
     export DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus"
     xsetroot -solid "$ROOT_KEY"
     root_key_watcher &
-    exec i3
+    xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Adwaita-dark 2>/dev/null
+    xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Papirus-Dark 2>/dev/null
+    xfconf-query -c xfwm4 -p /general/theme -n -t string -s Default 2>/dev/null
+    # LinuxXR changes the monitor layout (VR ring / panel size): no display dialog.
+    xfconf-query -c displays -p /Notify -n -t int -s 0 2>/dev/null
+    xfconf-query -c displays -p /AutoEnableProfiles -n -t bool -s false 2>/dev/null
+    xfsettingsd --replace &
+    # No compositor: it would paint the root black and hide the transparency key.
+    xfwm4 --replace --compositor=off &
+    # No xfdesktop on purpose: in VR only windows and the panel float over passthrough.
+    exec xfce4-panel
   ) > "$RUN/desktop-$i.log" 2>&1 &
   pids+=($!)
   echo "[linuxxr] display :$i listo ($RUN/display-$i.sock)"

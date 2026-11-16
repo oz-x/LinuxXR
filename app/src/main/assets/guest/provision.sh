@@ -1,8 +1,9 @@
 #!/bin/bash
 # LinuxXR first-boot provisioning for Debian 13 "trixie" (runs inside PRoot as fake root).
-# Desktop: i3 tiling window manager on X11 (no compositor needed, light on PRoot's CPU).
+# Desktop: XFCE (xfwm4 + panel) on X11, without xfdesktop so the root window can be the VR
+# transparency key.
 set -euo pipefail
-MARKER=/var/lib/linuxxr/provisioned-debian-i3-v1
+MARKER=/var/lib/linuxxr/provisioned-debian-xfce-v1
 [ -e "$MARKER" ] && { echo "[linuxxr] ya aprovisionado"; exit 0; }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -23,10 +24,16 @@ if dpkg -s plasma-workspace >/dev/null 2>&1; then
   rm -rf /root/.config/plasma* /root/.config/kwin* /root/.config/kde* /root/.local/share/plasma* /var/lib/linuxxr/breezedark-applied*
 fi
 
-echo "[linuxxr] instalando i3 (tiling), escritorio remoto y herramientas de agentes"
+# An intermediate LinuxXR version used i3: remove it.
+if dpkg -s i3-wm >/dev/null 2>&1; then
+  apt-get -y purge i3-wm i3status rofi dunst 2>/dev/null || true
+  rm -rf /root/.config/i3 /root/.config/rofi
+fi
+
+echo "[linuxxr] instalando XFCE, escritorio remoto y herramientas de agentes"
 apt-get -y install \
-  i3-wm i3status rofi dunst xfce4-terminal thunar adwaita-icon-theme papirus-icon-theme \
-  gnome-themes-extra \
+  xfwm4 xfce4-panel xfce4-settings xfconf xfce4-whiskermenu-plugin xfce4-terminal thunar \
+  adwaita-icon-theme papirus-icon-theme gnome-themes-extra \
   tigervnc-standalone-server tigervnc-tools dbus-x11 x11-xserver-utils x11-utils \
   xdotool scrot xclip \
   python3 python3-pil \

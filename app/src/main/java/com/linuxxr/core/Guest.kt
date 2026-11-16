@@ -32,7 +32,10 @@ class Guest(private val context: Context) {
 
     /** Refreshes host-derived files and LinuxXR's guest scripts. Safe to call on every start. */
     fun prepare() {
-        listOf(prootTmp, sysdata, shm, File(rootfs, "tmp"), File(rootfs, "run/linuxxr"), File(rootfs, "root"))
+        // pacman's `filesystem` package makes / mode 0555; the real owner (this app) needs to write there.
+        Os.chmod(rootfs.path, 0b111_101_101)
+        // .l2s must exist for --link2symlink (hard link emulation) to work.
+        listOf(prootTmp, sysdata, shm, File(rootfs, ".l2s"), File(rootfs, "tmp"), File(rootfs, "run/linuxxr"), File(rootfs, "root"))
             .forEach { it.mkdirs() }
         writeNetworkConfig()
         installGuestScripts()
@@ -56,6 +59,7 @@ class Guest(private val context: Context) {
             "session.sh" to "usr/local/lib/linuxxr/session.sh",
             "agentd.py" to "usr/local/lib/linuxxr/agentd.py",
             "linuxxr" to "usr/local/bin/linuxxr",
+            "bwrap-shim" to "usr/local/bin/bwrap",
             "linuxxr-gpu.sh" to "etc/profile.d/linuxxr-gpu.sh",
         )
         for ((asset, target) in targets) {

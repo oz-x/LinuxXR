@@ -1,0 +1,21 @@
+#!/bin/bash
+# LinuxXR: bubblewrap cannot create namespaces inside PRoot. GTK's image loaders (glycin)
+# always sandbox through bwrap, which crashed XFCE. This stand-in honours --chdir/--setenv
+# and runs the command directly: the whole guest is already confined to the app sandbox.
+cd_to=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    --unshare-*|--share-net|--die-with-parent|--new-session|--as-pid-1|--clearenv|--disable-userns|--assert-userns-disabled)
+      shift ;;
+    --chdir) cd_to="$2"; shift 2 ;;
+    --setenv) export "$2=$3"; shift 3 ;;
+    --unsetenv) unset "$2"; shift 2 ;;
+    --bind|--bind-try|--ro-bind|--ro-bind-try|--dev-bind|--dev-bind-try|--symlink|--file|--bind-data|--ro-bind-data|--chmod)
+      shift 3 ;;
+    --*) shift 2 ;;  # every other bwrap option takes one argument
+    *) break ;;
+  esac
+done
+[ -n "$cd_to" ] && cd "$cd_to"
+exec "$@"

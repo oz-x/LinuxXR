@@ -7,13 +7,22 @@ MARKER=/var/lib/linuxxr/provisioned-v1
 echo "[linuxxr] configurando pacman"
 # PRoot cannot really drop privileges to the alpm download user.
 sed -i 's/^DownloadUser/#DownloadUser/' /etc/pacman.conf
+# The geo-redirector (mirror.archlinuxarm.org) can hand out stale mirrors whose databases
+# reference packages that no longer exist (404). Pin current mirrors, redirector last.
+cat > /etc/pacman.d/mirrorlist <<'MIRRORS'
+Server = http://de.mirror.archlinuxarm.org/$arch/$repo
+Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
+Server = http://ca.us.mirror.archlinuxarm.org/$arch/$repo
+Server = http://dk.mirror.archlinuxarm.org/$arch/$repo
+Server = http://mirror.archlinuxarm.org/$arch/$repo
+MIRRORS
 if [ ! -s /etc/pacman.d/gnupg/trustdb.gpg ]; then
   pacman-key --init
   pacman-key --populate archlinuxarm
 fi
 
 echo "[linuxxr] actualizando sistema e instalando escritorio y herramientas de agentes"
-pacman -Syu --noconfirm --needed \
+pacman -Syyu --noconfirm --needed \
   base-devel git curl openssh sudo which nano less \
   tigervnc xorg-xauth xorg-xrandr xorg-xdpyinfo dbus \
   xfce4 xfce4-terminal \

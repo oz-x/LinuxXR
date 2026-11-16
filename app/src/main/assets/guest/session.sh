@@ -9,6 +9,10 @@ mkdir -p "$RUN" /tmp/.X11-unix
 chmod 1777 /tmp /tmp/.X11-unix
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+# bwrap cannot work under PRoot; point every caller at LinuxXR's pass-through shim and keep
+# pacman from restoring the real binary on upgrades.
+ln -sf /usr/local/bin/bwrap /usr/bin/bwrap
+grep -q '^NoExtract.*usr/bin/bwrap' /etc/pacman.conf || sed -i '/^\[options\]/a NoExtract = usr/bin/bwrap' /etc/pacman.conf
 [ -r /etc/profile.d/linuxxr-gpu.sh ] && . /etc/profile.d/linuxxr-gpu.sh
 
 pids=()
@@ -17,13 +21,21 @@ trap cleanup EXIT TERM INT
 
 for i in $(seq 1 "$N"); do
   rm -f "/tmp/.X$i-lock" "/tmp/.X11-unix/X$i" "$RUN/display-$i.sock"
+  # -nolock: X lock files use link(2), which Android forbids for apps.
   Xvnc ":$i" -geometry "$GEOM" -depth 24 -dpi 120 \
     -rfbunixpath "$RUN/display-$i.sock" -rfbunixmode 0600 -rfbport -1 \
     -SecurityTypes None -AlwaysShared -AcceptSetDesktopSize -nolisten tcp \
+    -nolock \
     > "$RUN/xvnc-$i.log" 2>&1 &
   pids+=($!)
   for _ in $(seq 50); do [ -S "/tmp/.X11-unix/X$i" ] && break; sleep 0.2; done
-  DISPLAY=":$i" dbus-launch --exit-with-session startxfce4 > "$RUN/desktop-$i.log" 2>&1 &
+  # Session bus on a filesystem socket (dbus-launch's abstract socket is not reachable under PRoot).
+  bus="unix:path=$RUN/bus-$i"
+  rm -f "$RUN/bus-$i"
+  dbus-daemon --session --nofork --nopidfile --address="$bus" > "$RUN/dbus-$i.log" 2>&1 &
+  pids+=($!)
+  for _ in $(seq 50); do [ -S "$RUN/bus-$i" ] && break; sleep 0.1; done
+  DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus" startxfce4 > "$RUN/desktop-$i.log" 2>&1 &
   pids+=($!)
   echo "[linuxxr] display :$i listo ($RUN/display-$i.sock)"
 done

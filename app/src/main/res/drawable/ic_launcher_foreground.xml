@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LinuxXR icon: terminal prompt inside VR goggles. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M28,38h52a8,8 0,0 1,8 8v16a8,8 0,0 1,-8 8h-14l-6,-8h-12l-6,8h-14a8,8 0,0 1,-8 -8v-16a8,8 0,0 1,8 -8z"/>
+    <path android:fillColor="#1C2233"
+        android:pathData="M36,47l8,6l-8,6l-2.5,-3l4.5,-3l-4.5,-3z"/>
+    <path android:fillColor="#1C2233" android:pathData="M47,57h12v3.5h-12z"/>
+</vector>

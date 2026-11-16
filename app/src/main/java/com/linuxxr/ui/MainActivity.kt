@@ -98,11 +98,16 @@ class MainActivity : Activity() {
             addView(agentInfo)
             addView(copyToken)
             addView(storageButton)
+            addView(Button(this@MainActivity).apply {
+                text = "Añadir acceso directo al inicio"
+                setOnClickListener { pinShortcut(DEEP_LINK) }
+            })
             addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
         setDisplays(displays)
         // Debug hook (adb, headset may be asleep): am start -n com.linuxxr/.ui.MainActivity --ez autostart true
+        if (com.linuxxr.BuildConfig.DEBUG && intent.getBooleanExtra("pin_shortcut", false)) pinShortcut(DEEP_LINK)
         if (com.linuxxr.BuildConfig.DEBUG && intent.getBooleanExtra("autostart", false) &&
             SessionService.state.value !is SessionState.Running) SessionService.start(this, displays, "1920x1080")
     }
@@ -124,6 +129,27 @@ class MainActivity : Activity() {
         super.onResume()
         storageButton.text = if (Guest(this).hasSharedStorage) "Carpeta compartida: ~/Quest ✓ (reinicia Linux si acabas de activarla)"
         else "Activar carpeta compartida con el Quest (~/Quest)"
+    }
+
+    /**
+     * Pins a LinuxXR shortcut. Horizon OS's confirmation dialog (SystemUX ShortcutCreationDialog)
+     * fills its URL field from the ShortcutInfo extra `android.intent.extra.shortcut.URI`;
+     * the URL is LinuxXR's own deep link, handled by MainActivity.
+     */
+    private fun pinShortcut(uri: String) {
+        val sm = getSystemService(android.content.pm.ShortcutManager::class.java)
+        if (sm == null || !sm.isRequestPinShortcutSupported) {
+            Toast.makeText(this, "Este Quest no admite accesos directos de apps", Toast.LENGTH_LONG).show()
+            return
+        }
+        val info = android.content.pm.ShortcutInfo.Builder(this, "linuxxr-home")
+            .setShortLabel("LinuxXR")
+            .setLongLabel("LinuxXR")
+            .setIcon(android.graphics.drawable.Icon.createWithResource(this, com.linuxxr.R.mipmap.ic_launcher))
+            .setIntent(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri)).setPackage(packageName))
+            .setExtras(android.os.PersistableBundle().apply { putString(EXTRA_SHORTCUT_URI, uri) })
+            .build()
+        sm.requestPinShortcut(info, null)
     }
 
     private fun requestSharedStorage() {
@@ -200,5 +226,7 @@ class MainActivity : Activity() {
     companion object {
         private const val PREF_DISPLAYS = "displays"
         private const val MAX_DISPLAYS = 4
+        private const val DEEP_LINK = "linuxxr://open"
+        private const val EXTRA_SHORTCUT_URI = "android.intent.extra.shortcut.URI"
     }
 }

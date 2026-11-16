@@ -46,6 +46,8 @@ android {
             version = "3.31.5"
         }
     }
+    defaultConfig.externalNativeBuild.cmake.arguments +=
+        "-DWHISPER_SRC=${layout.buildDirectory.dir("native-src/whisper").get().asFile.path.replace('\\', '/')}"
     packaging {
         // proot and its loader ship as lib*.so so Android extracts them to the
         // (executable) native library dir; apps targeting API 29+ cannot exec from data dirs.
@@ -81,6 +83,14 @@ val tallocSource = PinnedSource(
     "talloc-2.4.4",
 )
 
+// Offline dictation engine (VR keyboard), built by the app's CMake project below.
+val whisperSource = PinnedSource(
+    "whisper",
+    "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.9.5.tar.gz",
+    "ff1a9053feb509ff9d7729703355541ae9690073a6b1c40eb692c962e0dc1720",
+    "whisper.cpp-1.9.5",
+)
+
 val nativeSrcDir = layout.buildDirectory.dir("native-src")
 val nativeBuildDir = layout.buildDirectory.dir("native-build")
 val prootJniDir = layout.buildDirectory.dir("generated/prootJniLibs/arm64-v8a")
@@ -100,15 +110,17 @@ val fetchNativeSources by tasks.registering {
     outputs.dir(outDir)
     doLast {
         val root = outDir.get().asFile.apply { mkdirs() }
-        for (src in listOf(prootSource, tallocSource)) {
+        for (src in listOf(prootSource, tallocSource, whisperSource)) {
             val archive = File(root, "${src.name}.tar.gz")
+            val dest = File(root, src.name)
+            val stamp = File(dest, ".linuxxr-sha256")
+            if (stamp.isFile && stamp.readText() == src.sha256) continue
             if (!archive.exists() || sha256(archive) != src.sha256) {
                 logger.lifecycle("Downloading ${src.url}")
                 URI(src.url).toURL().openStream().use { input -> archive.outputStream().use { input.copyTo(it) } }
             }
             val actual = sha256(archive)
             check(actual == src.sha256) { "SHA-256 mismatch for ${src.url}: $actual" }
-            val dest = File(root, src.name)
             dest.deleteRecursively()
             copy {
                 from(tarTree(resources.gzip(archive)))
@@ -117,6 +129,7 @@ val fetchNativeSources by tasks.registering {
                 exclude("**/CLAUDE.md")
             }
             File(root, src.topDir).renameTo(dest)
+            stamp.writeText(src.sha256)
         }
     }
 }
@@ -155,3 +168,6 @@ val buildProot by tasks.registering {
 }
 
 tasks.named("preBuild") { dependsOn(buildProot) }
+// The app CMake project compiles whisper.cpp from the fetched sources.
+tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }
+    .configureEach { dependsOn(fetchNativeSources) }

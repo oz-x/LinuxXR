@@ -83,7 +83,7 @@ El APK queda en *Biblioteca → Fuentes desconocidas* del Quest.
 
 B/Y abre un teclado flotante delante de ti, inclinado como un teclado real. Se pulsa con el rayo y el gatillo, con vibración al pasar por cada tecla. Ctrl, Alt y Super se quedan fijos hasta la siguiente tecla.
 
-**🎤 Dictar** usa el reconocimiento de voz de Horizon OS y escribe lo que dices en la ventana activa. La barra superior muestra la transcripción en directo. Sigue escuchando hasta que vuelves a pulsar 🎤. El permiso de micrófono se pide al abrir LinuxXR.
+**🎤 Dictar** escribe lo que dices en la ventana activa y sigue escuchando hasta que vuelves a pulsar 🎤. Horizon OS no ofrece su reconocedor de voz a apps de terceros, así que LinuxXR usa **Whisper en el propio visor** ([whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.5, modelo multilingüe `small` q5_1, sin nube). La primera vez descarga el modelo (~190 MB, SHA-256 fijado). Corta las frases con un detector de voz por energía: lo dicho se escribe al hacer una pausa. Si el sistema llega a ofrecer un reconocedor, se usa ese con transcripción en directo. El permiso de micrófono se pide al abrir LinuxXR.
 
 ## Limitaciones conocidas
 
@@ -95,4 +95,4 @@ B/Y abre un teclado flotante delante de ti, inclinado como un teclado real. Se p
 
 ## Licencias
 
-PRoot es GPL-2.0 y talloc es LGPL-3.0. El build los descarga de sus fuentes oficiales con commit/versión y SHA-256 fijados (`app/build.gradle.kts`).
+PRoot es GPL-2.0, talloc es LGPL-3.0 y whisper.cpp es MIT. El build los descarga de sus fuentes oficiales con commit/versión y SHA-256 fijados (`app/build.gradle.kts`).

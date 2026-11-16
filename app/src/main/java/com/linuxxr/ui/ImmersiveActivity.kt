@@ -5,13 +5,10 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.opengl.GLUtils
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import java.util.Locale
 import android.opengl.GLES30
 import android.os.Bundle
 import android.view.KeyEvent
+import com.linuxxr.BuildConfig
 import com.linuxxr.core.Guest
 import com.linuxxr.core.SessionService
 import com.linuxxr.core.SessionState
@@ -37,7 +34,6 @@ class ImmersiveActivity : Activity() {
     private val keyboard = VrKeyboard()
     private var keyboardTex = 0
     private var keyboardUploaded = false
-    private var recognizer: SpeechRecognizer? = null
 
     /**
      * One GL texture per [TILE_W]-wide column of a display. These are only staging copies: the
@@ -80,7 +76,7 @@ class ImmersiveActivity : Activity() {
     }
 
     override fun onDestroy() {
-        recognizer?.destroy()
+        dictation.release()
         nativeRequestExit()
         renderThread?.join(3000)
         connections.forEach { it.close() }
@@ -211,11 +207,12 @@ class ImmersiveActivity : Activity() {
         return r and 3
     }
 
-    // ---- dictation (Horizon OS speech recognizer, types into the focused display) -------------
+    // ---- dictation: types into the display the controller last pointed at -------------------
 
     private fun toggleDictation() {
-        if (recognizer != null) {
-            stopDictation()
+        if (dictation.active) {
+            dictation.stop()
+            keyboard.dictating = false
             return
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -223,63 +220,18 @@ class ImmersiveActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
             return
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            keyboard.status = "El reconocimiento de voz no está disponible en este visor"
-            return
-        }
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply { setRecognitionListener(dictationListener) }
         keyboard.dictating = true
-        keyboard.status = "Escuchando…"
-        listen()
+        dictation.start()
     }
 
-    private fun listen() {
-        recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        })
+    private val dictation: Dictation by lazy {
+        Dictation(this, onStatus = { keyboard.status = it; keyboard.dictating = dictation.active }, onText = { typeText("$it ") })
     }
 
-    private fun stopDictation() {
-        recognizer?.destroy()
-        recognizer = null
-        keyboard.dictating = false
-        keyboard.status = "Dictado detenido"
-    }
-
-    private val dictationListener = object : RecognitionListener {
-        override fun onPartialResults(partial: Bundle) {
-            partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                ?.takeIf { it.isNotBlank() }?.let { keyboard.status = it }
-        }
-
-        override fun onResults(results: Bundle) {
-            val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-            if (text.isNotBlank()) {
-                typeText("$text ")
-                keyboard.status = "✓ $text"
-            }
-            if (recognizer != null) listen()  // continuous until the 🎤 key is pressed again
-        }
-
-        override fun onError(error: Int) {
-            when (error) {
-                // Silence: just keep listening.
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> if (recognizer != null) listen()
-                else -> {
-                    stopDictation()
-                    keyboard.status = "Error de dictado ($error)"
-                }
-            }
-        }
-
-        override fun onReadyForSpeech(params: Bundle?) { keyboard.status = "Escuchando…" }
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
-        override fun onEvent(eventType: Int, params: Bundle?) {}
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Debug hook (adb): am start -n com.linuxxr/.ui.ImmersiveActivity --ez toggle_dictation true
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("toggle_dictation", false)) toggleDictation()
     }
 
     private fun typeText(text: String) {

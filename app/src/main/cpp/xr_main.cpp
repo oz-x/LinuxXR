@@ -946,7 +946,7 @@ private:
 
     // Controls (Touch):
     //   trigger = click / drag · grip = grab the window under the ray and move it (Alt+drag)
-    //   A / X = right click · B / Y = virtual keyboard (with dictation)
+    //   A / X = right click · B / Y = virtual keyboard
     //   stick ↑↓ = scroll · stick ←→ = spin the 360° desktop · stick click: left = passthrough, right = recenter
     void handleInput(XrTime time) {
         XrActiveActionSet active{actionSet_, XR_NULL_PATH};

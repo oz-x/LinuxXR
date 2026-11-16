@@ -28,8 +28,7 @@ class VrKeyboard {
             Key("↑", KeySyms.UP) + Key("Shift", KeySyms.SHIFT_L, 1.4f),
         listOf(
             Key("Ctrl", KeySyms.CONTROL_L, 1.4f), Key("Super", KeySyms.SUPER_L, 1.4f), Key("Alt", KeySyms.ALT_L, 1.4f),
-            Key("🎤 Dictar", DICTATE, 2.2f),
-            Key("", 0x20, 5.0f), Key("←", KeySyms.LEFT), Key("↓", KeySyms.DOWN), Key("→", KeySyms.RIGHT),
+            Key("", 0x20, 7.2f), Key("←", KeySyms.LEFT), Key("↓", KeySyms.DOWN), Key("→", KeySyms.RIGHT),
             Key("✕", CLOSE, 1.6f),
         ),
     )
@@ -37,12 +36,6 @@ class VrKeyboard {
     val bitmap: Bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
     @Volatile var dirty = true
         private set
-
-    /** Dictation state shown in the top bar (set from the UI thread). */
-    @Volatile var dictating = false
-        set(value) { field = value; dirty = true }
-    @Volatile var status = "Teclado LinuxXR · 🎤 Dictar para escribir con la voz"
-        set(value) { field = value; dirty = true }
 
     private var hovered: Key? = null
     private var pressed: Key? = null
@@ -70,12 +63,12 @@ class VrKeyboard {
     private fun layout() {
         val pad = 14f
         val gap = 10f
-        val rowH = (HEIGHT - STATUS_H - 2 * pad - gap * (rows.size - 1)) / rows.size
+        val rowH = (HEIGHT - 2 * pad - gap * (rows.size - 1)) / rows.size
         rows.forEachIndexed { r, row ->
             val units = row.sumOf { it.width.toDouble() }.toFloat()
             val unitW = (WIDTH - 2 * pad - gap * (row.size - 1)) / units
             var x = pad
-            val y = STATUS_H + pad + r * (rowH + gap)
+            val y = pad + r * (rowH + gap)
             row.forEach { k ->
                 val w = unitW * k.width
                 k.rect.set(x, y, x + w, y + rowH)
@@ -91,17 +84,9 @@ class VrKeyboard {
         val c = Canvas(bitmap)
         c.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
         c.drawRoundRect(0f, 0f, WIDTH.toFloat(), HEIGHT.toFloat(), 28f, 28f, bg)
-        // Status bar: live dictation transcript (partial results) or a hint.
-        text.textSize = 34f
-        text.color = if (dictating) Color.rgb(255, 120, 120) else Color.rgb(170, 176, 196)
-        val line = (if (dictating) "● " else "") + status
-        val shown = if (text.measureText(line) > WIDTH - 60) "…" + line.takeLast(80) else line
-        c.drawText(shown, WIDTH / 2f, STATUS_H / 2f + 20f, text)
-        text.color = Color.WHITE
         rows.flatten().forEach { k ->
             val active = k == pressed || k.sym in sticky || (k.sym == KeySyms.SHIFT_L && shift) || (k.sym == CAPS && caps)
             keyPaint.color = when {
-                k.sym == DICTATE && dictating -> Color.rgb(210, 50, 60)
                 active -> Color.rgb(64, 132, 255)
                 k == hovered -> Color.rgb(78, 84, 104)
                 else -> Color.rgb(46, 50, 64)
@@ -123,7 +108,7 @@ class VrKeyboard {
 
     /**
      * Ray hit at (u, v) with the trigger state. Returns bit 1 when the hovered key changed (haptic
-     * tick), bit 2 when the keyboard should close and bit 4 to toggle dictation.
+     * tick) and bit 2 when the keyboard should close.
      */
     fun pointer(u: Float, v: Float, down: Boolean, client: RfbClient?): Int {
         var result = 0
@@ -136,11 +121,7 @@ class VrKeyboard {
         if (down && pressed == null && k != null) {
             pressed = k
             dirty = true
-            when (k.sym) {
-                CLOSE -> result = result or 2
-                DICTATE -> result = result or 4
-                else -> press(k, client)
-            }
+            if (k.sym == CLOSE) result = result or 2 else press(k, client)
         } else if (!down && pressed != null) {
             pressed = null
             dirty = true
@@ -177,11 +158,9 @@ class VrKeyboard {
 
     companion object {
         const val WIDTH = 1600
-        const val HEIGHT = 650
-        private const val STATUS_H = 90f
+        const val HEIGHT = 560
         private const val CAPS = -1
         private const val CLOSE = -2
-        private const val DICTATE = -3
         private val SHIFTED = mapOf(
             '1' to "!", '2' to "@", '3' to "#", '4' to "$", '5' to "%", '6' to "^", '7' to "&", '8' to "*",
             '9' to "(", '0' to ")", '-' to "_", '=' to "+", '[' to "{", ']' to "}", '\\' to "|", ';' to ":",

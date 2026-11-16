@@ -1,14 +1,10 @@
 package com.linuxxr.ui
 
-import android.Manifest
 import android.app.Activity
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.opengl.GLUtils
 import android.opengl.GLES30
 import android.os.Bundle
 import android.view.KeyEvent
-import com.linuxxr.BuildConfig
 import com.linuxxr.core.Guest
 import com.linuxxr.core.SessionService
 import com.linuxxr.core.SessionState
@@ -76,7 +72,6 @@ class ImmersiveActivity : Activity() {
     }
 
     override fun onDestroy() {
-        dictation.release()
         nativeRequestExit()
         renderThread?.join(3000)
         connections.forEach { it.close() }
@@ -195,54 +190,16 @@ class ImmersiveActivity : Activity() {
         return intArrayOf(keyboardTex, VrKeyboard.WIDTH, VrKeyboard.HEIGHT, if (upload) 1 else 0)
     }
 
-    /** Ray on the keyboard; returns VrKeyboard.pointer flags (1 haptic, 2 close, 4 dictation). */
+    /** Ray on the keyboard; returns VrKeyboard.pointer flags (1 haptic, 2 close). */
     @Suppress("unused")
     fun onKeyboardPointer(u: Float, v: Float, down: Boolean): Int {
         if (u < 0f) {
             keyboard.leave()
             return 0
         }
-        val r = keyboard.pointer(u, v, down, connections.getOrNull(focusedDisplay)?.client)
-        if (r and 4 != 0) runOnUiThread { toggleDictation() }
-        return r and 3
+        return keyboard.pointer(u, v, down, connections.getOrNull(focusedDisplay)?.client)
     }
 
-    // ---- dictation: types into the display the controller last pointed at -------------------
-
-    private fun toggleDictation() {
-        if (dictation.active) {
-            dictation.stop()
-            keyboard.dictating = false
-            return
-        }
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            keyboard.status = "Falta permiso de micrófono: concédelo en el panel de LinuxXR"
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
-            return
-        }
-        keyboard.dictating = true
-        dictation.start()
-    }
-
-    private val dictation: Dictation by lazy {
-        Dictation(this, onStatus = { keyboard.status = it; keyboard.dictating = dictation.active }, onText = { typeText("$it ") })
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        // Debug hook (adb): am start -n com.linuxxr/.ui.ImmersiveActivity --ez toggle_dictation true
-        if (BuildConfig.DEBUG && intent.getBooleanExtra("toggle_dictation", false)) toggleDictation()
-        if (BuildConfig.DEBUG) intent.getStringExtra("bench_wav")?.let { dictation.benchmark(java.io.File(it)) }
-    }
-
-    private fun typeText(text: String) {
-        val c = connections.getOrNull(focusedDisplay)?.client ?: return
-        text.codePoints().forEach {
-            val sym = KeySyms.forCodePoint(it)
-            c.sendKey(sym, true)
-            c.sendKey(sym, false)
-        }
-    }
 
     @Suppress("unused")
     fun onScroll(index: Int, u: Float, v: Float, up: Boolean) {

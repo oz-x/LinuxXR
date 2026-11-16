@@ -17,7 +17,21 @@ install_kde() {
   touch "$KDE_MARKER"
 }
 
+# Installs made before hard-link emulation worked (missing .l2s dir) lost hard-linked files
+# (gcc, perl, git…). Reinstall any package with missing files, once.
+REPAIR_MARKER=/var/lib/linuxxr/repair-hardlinks-v1
+repair_packages() {
+  local broken
+  broken=$(pacman -Qk 2>/dev/null | grep -v ' 0 missing' | cut -d: -f1 | sort -u || true)
+  if [ -n "$broken" ]; then
+    echo "[linuxxr] reparando paquetes con archivos perdidos: $broken"
+    pacman -S --noconfirm $broken
+  fi
+  touch "$REPAIR_MARKER"
+}
+
 if [ -e "$MARKER" ]; then
+  [ -e "$REPAIR_MARKER" ] || repair_packages
   [ -e "$KDE_MARKER" ] || install_kde
   echo "[linuxxr] ya aprovisionado"
   exit 0
@@ -62,5 +76,6 @@ echo '--no-sandbox' > /etc/chromium-flags.conf 2>/dev/null || true
 mkdir -p /root/.config && echo '--no-sandbox' > /root/.config/chromium-flags.conf
 
 install_kde
+touch "$REPAIR_MARKER"
 touch "$MARKER"
 echo "[linuxxr] aprovisionamiento completo"

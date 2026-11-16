@@ -41,9 +41,40 @@ class Guest(private val context: Context) {
         // .l2s must exist for --link2symlink (hard link emulation) to work.
         listOf(prootTmp, sysdata, shm, File(rootfs, ".l2s"), File(rootfs, "tmp"), File(rootfs, "run/linuxxr"), File(rootfs, "root"))
             .forEach { it.mkdirs() }
+        repairHardLinkTargets()
         writeNetworkConfig()
         installGuestScripts()
         writeFakeProcFiles()
+    }
+
+    /**
+     * Earlier versions gave PRoot a non-canonical L2S dir, so emulated hard links (gcc, perl, git…)
+     * point at /data/user/0/… and are dangling inside the guest. Rewrite them once.
+     */
+    private fun repairHardLinkTargets() {
+        val marker = File(base, ".l2s-canonical-v1")
+        if (marker.exists() || !rootfs.isDirectory) return
+        val wrong = File(rootfs, ".l2s").absolutePath + "/"
+        val right = File(rootfs.canonicalFile, ".l2s").path + "/"
+        if (wrong != right) {
+            // walkFileTree (not Files.walk) so unreadable guest dirs are skipped instead of aborting.
+            java.nio.file.Files.walkFileTree(rootfs.toPath(), object : java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
+                override fun visitFile(file: java.nio.file.Path, attrs: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
+                    if (attrs.isSymbolicLink) {
+                        val target = runCatching { java.nio.file.Files.readSymbolicLink(file).toString() }.getOrNull()
+                        if (target != null && target.startsWith(wrong)) {
+                            java.nio.file.Files.delete(file)
+                            Os.symlink(right + target.removePrefix(wrong), file.toString())
+                        }
+                    }
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun visitFileFailed(file: java.nio.file.Path, exc: java.io.IOException) =
+                    java.nio.file.FileVisitResult.CONTINUE
+            })
+        }
+        marker.createNewFile()
     }
 
     private fun writeNetworkConfig() {
@@ -129,7 +160,7 @@ class Guest(private val context: Context) {
             "-L",
             "--kernel-release=$KERNEL_RELEASE",
             "--root-id",
-            "--rootfs=${rootfs.path}",
+            "--rootfs=${rootfs.canonicalPath}",
             "--cwd=/root",
             "--bind=/dev",
             "--bind=/proc",
@@ -159,7 +190,9 @@ class Guest(private val context: Context) {
                 clear()
                 put("PROOT_LOADER", File(nativeLibDir, "libproot-loader.so").path)
                 put("PROOT_TMP_DIR", prootTmp.path)
-                put("PROOT_L2S_DIR", File(rootfs, ".l2s").path)
+                // Canonical (/data/data/…): PRoot only maps hard-link symlinks back into the guest
+                // when their target starts with the canonical rootfs path, not /data/user/0/….
+                put("PROOT_L2S_DIR", File(rootfs.canonicalFile, ".l2s").path)
                 put("PATH", "/system/bin")
             }
         }

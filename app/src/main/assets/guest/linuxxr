@@ -1,0 +1,75 @@
+#!/bin/bash
+# LinuxXR helper CLI (inside the guest).
+set -euo pipefail
+MESA_VERSION=26.2.7
+MESA_URL="https://archive.mesa3d.org/mesa-$MESA_VERSION.tar.xz"
+MESA_SHA256=04294f75d22e9f61cd1e050206bc48b3d39366e788f1803a3368e3d5a872ce18
+MESA_PREFIX=/opt/linuxxr/mesa
+
+usage() {
+  cat <<USAGE
+linuxxr gpu build      Compila Mesa $MESA_VERSION con Turnip (KGSL, Adreno 740) + Zink en $MESA_PREFIX
+linuxxr gpu status     Muestra el renderer Vulkan/OpenGL activo
+linuxxr agents install <claude|codex|gemini>...   Instala CLIs de agentes (npm global)
+linuxxr token          Muestra el token del puente de agentes (agentd)
+linuxxr tunnel <usuario@host> [puerto]   Publica agentd en un servidor remoto por SSH (-R)
+USAGE
+}
+
+gpu_build() {
+  [ -e /dev/kgsl-3d0 ] || echo "aviso: /dev/kgsl-3d0 no visible; el build seguirá, pero Turnip no podrá abrir la GPU" >&2
+  pacman -S --noconfirm --needed base-devel meson ninja python-mako python-yaml python-packaging \
+    glslang libdrm libx11 libxext libxfixes libxcb libxshmfence libxxf86vm libxrandr \
+    libglvnd xorgproto expat zlib zstd libdisplay-info flex bison
+  local work=/var/cache/linuxxr/mesa
+  mkdir -p "$work" && cd "$work"
+  if [ ! -d "mesa-$MESA_VERSION" ]; then
+    curl -fL -o mesa.tar.xz "$MESA_URL"
+    echo "$MESA_SHA256  mesa.tar.xz" | sha256sum -c -
+    tar xf mesa.tar.xz
+  fi
+  cd "mesa-$MESA_VERSION"
+  rm -rf build
+  meson setup build --prefix="$MESA_PREFIX" --libdir=lib -Dbuildtype=release -Db_ndebug=true \
+    -Dplatforms=x11 -Dgallium-drivers=zink -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl \
+    -Dglx=dri -Degl=enabled -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dglvnd=enabled \
+    -Dllvm=disabled -Dvalgrind=disabled -Dlibunwind=disabled -Dvideo-codecs=
+  ninja -C build -j"$(nproc)"
+  ninja -C build install
+  echo "Mesa instalado en $MESA_PREFIX. Reinicia la sesión LinuxXR para activar la GPU."
+}
+
+gpu_status() {
+  [ -r /etc/profile.d/linuxxr-gpu.sh ] && . /etc/profile.d/linuxxr-gpu.sh
+  echo "LINUXXR_GPU=${LINUXXR_GPU:-off}"
+  vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|driverName|apiVersion' || echo "vulkaninfo: sin dispositivo"
+  DISPLAY="${DISPLAY:-:1}" glxinfo -B 2>/dev/null | grep -E 'OpenGL (renderer|version)' || echo "glxinfo: sin display"
+}
+
+case "${1:-}" in
+  gpu)
+    case "${2:-}" in build) gpu_build ;; status) gpu_status ;; *) usage; exit 1 ;; esac ;;
+  agents)
+    [ "${2:-}" = install ] || { usage; exit 1; }
+    shift 2
+    [ $# -gt 0 ] || set -- claude codex gemini
+    pkgs=()
+    for a in "$@"; do
+      case "$a" in
+        claude) pkgs+=(@anthropic-ai/claude-code) ;;
+        codex) pkgs+=(@openai/codex) ;;
+        gemini) pkgs+=(@google/gemini-cli) ;;
+        *) echo "agente desconocido: $a" >&2; exit 1 ;;
+      esac
+    done
+    npm install -g "${pkgs[@]}" ;;
+  token) cat /etc/linuxxr/agent-token; echo ;;
+  tunnel)
+    host="${2:?usuario@host}"; port="${3:-7777}"
+    echo "agentd disponible en $host:127.0.0.1:$port mientras este comando siga activo"
+    while true; do
+      ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -R "127.0.0.1:$port:127.0.0.1:7777" "$host" || true
+      sleep 5
+    done ;;
+  *) usage ;;
+esac

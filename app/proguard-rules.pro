@@ -1,0 +1,3 @@
+-keep class com.linuxxr.** { *; }
+-dontwarn org.apache.commons.compress.**
+-dontwarn org.tukaani.xz.**

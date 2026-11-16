@@ -12,6 +12,7 @@ class DisplayConnection(
     private val socketPath: File,
     val display: Int,
     private val listener: Listener,
+    private val transparentKey: Int? = null,
 ) {
     interface Listener : RfbClient.Listener {
         fun onConnected(client: RfbClient) {}
@@ -39,7 +40,7 @@ class DisplayConnection(
                 val s = LocalSocket()
                 socket = s
                 s.connect(LocalSocketAddress(socketPath.path, LocalSocketAddress.Namespace.FILESYSTEM))
-                val c = RfbClient(s.inputStream, s.outputStream, listener)
+                val c = RfbClient(s.inputStream, s.outputStream, listener, transparentKey)
                 c.handshake()
                 client = c
                 listener.onConnected(c)

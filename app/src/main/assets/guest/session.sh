@@ -5,6 +5,8 @@ set -u
 N="${1:-1}"
 GEOM="${2:-1920x1080}"
 RUN=/run/linuxxr
+# Must match LinuxXR's VR transparency key (ImmersiveActivity.ROOT_KEY).
+ROOT_KEY="#01FE02"
 mkdir -p "$RUN" /tmp/.X11-unix
 chmod 1777 /tmp /tmp/.X11-unix
 export XDG_RUNTIME_DIR=/tmp/runtime-root
@@ -15,6 +17,7 @@ ln -sf /usr/local/bin/bwrap /usr/bin/bwrap
 grep -q '^NoExtract.*usr/bin/bwrap' /etc/pacman.conf || sed -i '/^\[options\]/a NoExtract = usr/bin/bwrap' /etc/pacman.conf
 [ -r /etc/profile.d/linuxxr-gpu.sh ] && . /etc/profile.d/linuxxr-gpu.sh
 
+dbus-uuidgen --ensure 2>/dev/null || true   # xfconf/dbus need a machine-id
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null; wait; }
 trap cleanup EXIT TERM INT
@@ -35,7 +38,16 @@ for i in $(seq 1 "$N"); do
   dbus-daemon --session --nofork --nopidfile --address="$bus" > "$RUN/dbus-$i.log" 2>&1 &
   pids+=($!)
   for _ in $(seq 50); do [ -S "$RUN/bus-$i" ] && break; sleep 0.1; done
-  DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus" startxfce4 > "$RUN/desktop-$i.log" 2>&1 &
+  # No desktop (xfdesktop) on purpose: the bare root window is painted with the transparency
+  # key colour, so in VR only the windows float over passthrough. Panel = taskbar/launcher.
+  (
+    export DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus"
+    xsetroot -solid "$ROOT_KEY"
+    xfsettingsd --replace &
+    # No compositor: xfwm4's compositor paints the root black, hiding the transparency key.
+    xfwm4 --replace --compositor=off &
+    exec xfce4-panel
+  ) > "$RUN/desktop-$i.log" 2>&1 &
   pids+=($!)
   echo "[linuxxr] display :$i listo ($RUN/display-$i.sock)"
 done

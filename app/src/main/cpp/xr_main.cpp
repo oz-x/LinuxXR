@@ -1,10 +1,12 @@
 // LinuxXR immersive mode: OpenXR stereo renderer for the Linux desktops.
 //
-// Each X display is drawn as a curved screen on a cylinder around the user, rendered
-// separately for each eye (true stereo 3D, head-tracked). Controllers point at the screens:
-// trigger = left click, grip = right click, thumbstick = scroll, A/X = toggle passthrough,
-// B/Y = recenter. Framebuffer uploads happen in Kotlin (ImmersiveActivity.onFrame) on this
-// thread, with this EGL context current.
+// Display :1 is a 360° desktop (six RandR monitors side by side) wrapped all around the user;
+// other displays sit above it. Desktop tiles are OpenXR cylinder composition layers sampled
+// directly by the compositor (sharpest path for text); passthrough is the background, and the
+// bare X root window is transparent so windows float in the room. Controllers: trigger = left
+// click, grip = right click, stick up/down = scroll, stick left/right = spin the desktop 30°,
+// A/X = passthrough on/off, B/Y = recenter. Uploads happen in Kotlin (ImmersiveActivity.onFrame)
+// on this thread, with this EGL context current.
 
 #include <jni.h>
 #include <android/log.h>
@@ -152,26 +154,6 @@ GLuint program(const char* vs, const char* fs) {
     return p;
 }
 
-const char* kScreenVs = R"(#version 300 es
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUv;
-uniform mat4 uMvp;
-out vec2 vUv;
-void main() { vUv = aUv; gl_Position = uMvp * vec4(aPos, 1.0); })";
-
-const char* kScreenFs = R"(#version 300 es
-precision mediump float;
-in vec2 vUv;
-uniform sampler2D uTex;
-uniform vec4 uTint;      // a > 0: solid placeholder colour instead of the texture
-out vec4 color;
-void main() {
-    vec3 c = uTint.a > 0.0 ? uTint.rgb : texture(uTex, vUv).rgb;
-    // Thin bezel so screens read as objects in space.
-    float e = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-    color = vec4(mix(vec3(0.02), c, smoothstep(0.0, 0.003, e)), 1.0);
-})";
-
 const char* kColorVs = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
 uniform mat4 uMvp;
@@ -179,6 +161,7 @@ uniform float uPointSize;
 out vec3 vPos;
 void main() { vPos = aPos; gl_PointSize = uPointSize; gl_Position = uMvp * vec4(aPos, 1.0); })";
 
+// Premultiplied output: the overlay layer is composited with source alpha.
 const char* kColorFs = R"(#version 300 es
 precision mediump float;
 in vec3 vPos;
@@ -189,22 +172,34 @@ out vec4 color;
 void main() {
     float a = uColor.a;
     if (uFadeRadius > 0.0) a *= 1.0 - smoothstep(0.0, uFadeRadius, distance(vPos.xz, uFadeCenter.xz));
-    color = vec4(uColor.rgb, a);
+    color = vec4(uColor.rgb * a, a);
 })";
 
 // ---------------------------------------------------------------------------------------------
 
-constexpr float kRadius = 1.8f;          // metres from the user to the screens
-constexpr float kPixelsPerMetre = 1200;  // 1920 px wide desktop = 1.6 m
-constexpr float kGap = 0.06f;            // radians between screens
-constexpr int kSegments = 64;
+constexpr float kPi = 3.14159265358979f;
+constexpr float kRadius = 1.8f;                    // metres from the user to the desktop
+constexpr float kDefaultPxPerRad = 8640 / (2 * kPi);  // ~24 px/deg = Quest 3 panel density
 constexpr int kMaxDisplays = 4;
+constexpr int kMaxTiles = 8;
 
-struct ScreenGeom {
-    float theta0 = 0, theta1 = 0;  // angular span (0 = straight ahead, positive to the right)
-    float top = 0, bottom = 0;     // heights in layout space
-    int width = 0, height = 0;     // framebuffer pixels
-    GLuint texture = 0;
+// A cylinder-layer swapchain holding one tile (a column) of a display's framebuffer. The
+// compositor samples it directly at display resolution: no intermediate eye-buffer pass.
+struct Tile {
+    XrSwapchain swapchain = XR_NULL_HANDLE;
+    int width = 0, height = 0;
+    std::vector<XrSwapchainImageOpenGLESKHR> images;
+    std::vector<GLuint> fbos;
+    bool hasContent = false;
+};
+
+struct Screen {
+    int width = 0, height = 0, tileW = 0;
+    std::vector<GLuint> sources;  // Kotlin staging textures, one per tile
+    std::vector<Tile> tiles;
+    float theta0 = 0, span = 0;   // angular extent; 0 = straight ahead, positive to the right
+    float top = 0, bottom = 0;    // heights relative to eye level (metres)
+    bool visible = false;
 };
 
 struct Hand {
@@ -217,8 +212,15 @@ struct Hand {
     int hitDisplay = -1;
     float u = 0, v = 0;
     bool trigger = false, grip = false;
-    bool primaryPrev = false, secondaryPrev = false;
+    bool primaryPrev = false, secondaryPrev = false, stickXPrev = false;
 };
+
+float wrapPositive(float a) {
+    a = std::fmod(a, 2 * kPi);
+    return a < 0 ? a + 2 * kPi : a;
+}
+
+XrQuaternionf yawQuat(float yaw) { return {0, std::sin(yaw / 2), 0, std::cos(yaw / 2)}; }
 
 #define XR_CHECK(call)                                                        \
     do {                                                                      \
@@ -236,17 +238,23 @@ public:
     }
 
     bool run(JavaVM* vm) {
-        if (!initInstance(vm) || !initEgl() || !initSession() || !initSwapchains() || !initActions()) return false;
+        if (!initInstance(vm) || !initEgl() || !initSession() || !initActions()) return false;
+        if (!createEyeSwapchains(env_layer_) || !createEyeSwapchains(overlay_)) return false;
         initPassthrough();
-        initGl();
+        colorProg_ = program(kColorVs, kColorFs);
+        glGenBuffers(1, &lineVbo_);
+        glGenBuffers(1, &gridVbo_);
+        glGenFramebuffers(1, &readFbo_);
         loop();
         return true;
     }
 
     ~App() {
+        for (auto& s : screens_) for (auto& t : s.tiles) destroyTile(t);
         if (passthroughLayer_) destroyPassthroughLayer_(passthroughLayer_);
         if (passthrough_) destroyPassthrough_(passthrough_);
-        for (auto& sc : swapchains_) if (sc.handle) xrDestroySwapchain(sc.handle);
+        for (auto* set : {env_layer_, overlay_})
+            for (int i = 0; i < 2; ++i) if (set[i].handle) xrDestroySwapchain(set[i].handle);
         if (session_) xrDestroySession(session_);
         if (instance_) xrDestroyInstance(instance_);
         if (eglDisplay_ != EGL_NO_DISPLAY) {
@@ -275,7 +283,9 @@ private:
     XrSpace local_ = XR_NULL_HANDLE, view_ = XR_NULL_HANDLE;
     XrSessionState state_ = XR_SESSION_STATE_UNKNOWN;
     bool running_ = false;
-    Swapchain swapchains_[2];
+    int64_t format_ = GL_SRGB8_ALPHA8;
+    Swapchain env_layer_[2];  // dark room + floor grid (only without passthrough), under the desktop
+    Swapchain overlay_[2];    // controller rays and cursor, over the desktop
     std::vector<XrViewConfigurationView> viewConfigs_;
 
     EGLDisplay eglDisplay_ = EGL_NO_DISPLAY;
@@ -290,6 +300,7 @@ private:
     Hand hands_[2];
     int activeHand_ = 1;
 
+    bool hasLayerSettings_ = false;
     bool hasPassthrough_ = false;
     bool passthroughOn_ = false;
     XrPassthroughFB passthrough_ = XR_NULL_HANDLE;
@@ -301,13 +312,14 @@ private:
     PFN_xrPassthroughLayerPauseFB pauseLayer_ = nullptr;
     PFN_xrPassthroughLayerResumeFB resumeLayer_ = nullptr;
 
-    GLuint screenProg_ = 0, colorProg_ = 0;
-    GLuint screenVbo_ = 0, lineVbo_ = 0, gridVbo_ = 0;
+    GLuint colorProg_ = 0, lineVbo_ = 0, gridVbo_ = 0, readFbo_ = 0;
     GLsizei gridVertexCount_ = 0;
 
-    ScreenGeom screens_[kMaxDisplays];
+    Screen screens_[kMaxDisplays];
     int screenCount_ = 0;
     bool layoutValid_ = false;
+    float layoutYaw_ = 0;
+    Vec3 layoutPos_{};
     Mat4 layout_ = identity(), layoutInv_ = identity();
     float floorY_ = -1.6f;
 
@@ -334,9 +346,16 @@ private:
             for (auto& e : exts) if (!strcmp(e.extensionName, name)) return true;
             return false;
         };
-        std::vector<const char*> enabled{XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME};
+        if (!has(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME)) {
+            LOGE("runtime lacks %s", XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+            return false;
+        }
+        std::vector<const char*> enabled{XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
+                                         XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME};
         hasPassthrough_ = has(XR_FB_PASSTHROUGH_EXTENSION_NAME);
         if (hasPassthrough_) enabled.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+        hasLayerSettings_ = has(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+        if (hasLayerSettings_) enabled.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
 
         XrInstanceCreateInfoAndroidKHR android{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
         android.applicationVM = vm;
@@ -396,10 +415,7 @@ private:
         XR_CHECK(xrCreateReferenceSpace(session_, &rs, &local_));
         rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
         XR_CHECK(xrCreateReferenceSpace(session_, &rs, &view_));
-        return true;
-    }
 
-    bool initSwapchains() {
         uint32_t n = 0;
         XR_CHECK(xrEnumerateViewConfigurationViews(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &n, nullptr));
         viewConfigs_.assign(n, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
@@ -410,36 +426,51 @@ private:
         xrEnumerateSwapchainFormats(session_, 0, &fc, nullptr);
         std::vector<int64_t> formats(fc);
         xrEnumerateSwapchainFormats(session_, fc, &fc, formats.data());
-        int64_t format = GL_RGBA8;
-        for (auto f : formats) if (f == GL_SRGB8_ALPHA8) format = GL_SRGB8_ALPHA8;
+        format_ = GL_RGBA8;
+        for (auto f : formats) if (f == GL_SRGB8_ALPHA8) format_ = GL_SRGB8_ALPHA8;
+        return true;
+    }
 
-        for (int eye = 0; eye < 2; ++eye) {
-            auto& sc = swapchains_[eye];
-            sc.width = (int32_t)viewConfigs_[eye].recommendedImageRectWidth;
-            sc.height = (int32_t)viewConfigs_[eye].recommendedImageRectHeight;
-            XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-            ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-            ci.format = format;
-            ci.sampleCount = 1;
-            ci.width = sc.width;
-            ci.height = sc.height;
-            ci.faceCount = 1;
-            ci.arraySize = 1;
-            ci.mipCount = 1;
-            XR_CHECK(xrCreateSwapchain(session_, &ci, &sc.handle));
-            uint32_t ic = 0;
-            XR_CHECK(xrEnumerateSwapchainImages(sc.handle, 0, &ic, nullptr));
-            sc.images.assign(ic, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
-            XR_CHECK(xrEnumerateSwapchainImages(sc.handle, ic, &ic, (XrSwapchainImageBaseHeader*)sc.images.data()));
-            sc.fbos.resize(ic);
-            glGenFramebuffers((GLsizei)ic, sc.fbos.data());
-            for (uint32_t i = 0; i < ic; ++i) {
-                glBindFramebuffer(GL_FRAMEBUFFER, sc.fbos[i]);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sc.images[i].image, 0);
-            }
+    bool createSwapchain(int w, int h, uint32_t mips, XrSwapchain* out, std::vector<XrSwapchainImageOpenGLESKHR>& images,
+                         std::vector<GLuint>& fbos) {
+        XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        ci.format = format_;
+        ci.sampleCount = 1;
+        ci.width = (uint32_t)w;
+        ci.height = (uint32_t)h;
+        ci.faceCount = 1;
+        ci.arraySize = 1;
+        ci.mipCount = mips;
+        XR_CHECK(xrCreateSwapchain(session_, &ci, out));
+        uint32_t ic = 0;
+        XR_CHECK(xrEnumerateSwapchainImages(*out, 0, &ic, nullptr));
+        images.assign(ic, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+        XR_CHECK(xrEnumerateSwapchainImages(*out, ic, &ic, (XrSwapchainImageBaseHeader*)images.data()));
+        fbos.resize(ic);
+        glGenFramebuffers((GLsizei)ic, fbos.data());
+        for (uint32_t i = 0; i < ic; ++i) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, images[i].image, 0);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return true;
+    }
+
+    bool createEyeSwapchains(Swapchain (&set)[2]) {
+        for (int eye = 0; eye < 2; ++eye) {
+            auto& sc = set[eye];
+            sc.width = (int32_t)viewConfigs_[eye].recommendedImageRectWidth;
+            sc.height = (int32_t)viewConfigs_[eye].recommendedImageRectHeight;
+            if (!createSwapchain(sc.width, sc.height, 1, &sc.handle, sc.images, sc.fbos)) return false;
+        }
+        return true;
+    }
+
+    void destroyTile(Tile& t) {
+        if (!t.fbos.empty()) glDeleteFramebuffers((GLsizei)t.fbos.size(), t.fbos.data());
+        if (t.swapchain) xrDestroySwapchain(t.swapchain);
+        t = Tile{};
     }
 
     XrPath path(const char* s) {
@@ -470,7 +501,7 @@ private:
         if (!createAction(&aimAction_, XR_ACTION_TYPE_POSE_INPUT, "aim", "Aim") ||
             !createAction(&triggerAction_, XR_ACTION_TYPE_FLOAT_INPUT, "click", "Click") ||
             !createAction(&gripAction_, XR_ACTION_TYPE_FLOAT_INPUT, "right_click", "Right click") ||
-            !createAction(&stickAction_, XR_ACTION_TYPE_VECTOR2F_INPUT, "scroll", "Scroll") ||
+            !createAction(&stickAction_, XR_ACTION_TYPE_VECTOR2F_INPUT, "scroll_rotate", "Scroll / rotate") ||
             !createAction(&primaryAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "toggle_passthrough", "Toggle passthrough") ||
             !createAction(&secondaryAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "recenter", "Recenter") ||
             !createAction(&hapticAction_, XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Haptic"))
@@ -527,23 +558,20 @@ private:
         xrGetInstanceProcAddr(instance_, "xrPassthroughLayerResumeFB", (PFN_xrVoidFunction*)&resumeLayer_);
         XrPassthroughCreateInfoFB pci{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
         pci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
-        XrPassthroughLayerCreateInfoFB lci{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
         if (!createPassthrough_ || XR_FAILED(createPassthrough_(session_, &pci, &passthrough_))) {
             hasPassthrough_ = false;
             return;
         }
+        // Passthrough is the default background: windows float in the real room.
+        XrPassthroughLayerCreateInfoFB lci{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
         lci.passthrough = passthrough_;
         lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
-        lci.flags = 0;  // created paused; A/X resumes it
-        if (XR_FAILED(createPassthroughLayer_(session_, &lci, &passthroughLayer_))) hasPassthrough_ = false;
-    }
-
-    void initGl() {
-        screenProg_ = program(kScreenVs, kScreenFs);
-        colorProg_ = program(kColorVs, kColorFs);
-        glGenBuffers(1, &screenVbo_);
-        glGenBuffers(1, &lineVbo_);
-        glGenBuffers(1, &gridVbo_);
+        lci.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+        if (XR_FAILED(createPassthroughLayer_(session_, &lci, &passthroughLayer_))) {
+            hasPassthrough_ = false;
+            return;
+        }
+        passthroughOn_ = true;
     }
 
     // --- per frame ----------------------------------------------------------------------------
@@ -594,9 +622,18 @@ private:
 
         std::vector<XrCompositionLayerBaseHeader*> layers;
         XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
-        XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-        XrCompositionLayerProjectionView projViews[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
-                                                      {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+        XrCompositionLayerProjection envProj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        XrCompositionLayerProjection overlayProj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        XrCompositionLayerProjectionView envViews[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+                                                     {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+        XrCompositionLayerProjectionView overlayViews[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+                                                         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+        std::vector<XrCompositionLayerCylinderKHR> cylinders;
+        cylinders.reserve(kMaxDisplays * kMaxTiles);
+        XrCompositionLayerSettingsFB settings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
+        // Compositor-side supersampling + sharpening: the recommended path for text on Quest.
+        settings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                              XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
 
         if (fs.shouldRender) {
             XrViewState vs{XR_TYPE_VIEW_STATE};
@@ -615,23 +652,23 @@ private:
             handleInput(fs.predictedDisplayTime);
 
             if (tracked) {
-                for (int eye = 0; eye < 2; ++eye) {
-                    renderEye(eye, views[eye]);
-                    auto& sc = swapchains_[eye];
-                    projViews[eye].pose = views[eye].pose;
-                    projViews[eye].fov = views[eye].fov;
-                    projViews[eye].subImage.swapchain = sc.handle;
-                    projViews[eye].subImage.imageRect = {{0, 0}, {sc.width, sc.height}};
-                }
                 if (passthroughOn_) {
                     ptLayer.layerHandle = passthroughLayer_;
                     layers.push_back((XrCompositionLayerBaseHeader*)&ptLayer);
-                    proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                } else {
+                    for (int eye = 0; eye < 2; ++eye) renderEye(env_layer_[eye], envViews[eye], views[eye], true);
+                    envProj.space = local_;
+                    envProj.viewCount = 2;
+                    envProj.views = envViews;
+                    layers.push_back((XrCompositionLayerBaseHeader*)&envProj);
                 }
-                proj.space = local_;
-                proj.viewCount = 2;
-                proj.views = projViews;
-                layers.push_back((XrCompositionLayerBaseHeader*)&proj);
+                if (layoutValid_) addCylinders(cylinders, settings, layers);
+                for (int eye = 0; eye < 2; ++eye) renderEye(overlay_[eye], overlayViews[eye], views[eye], false);
+                overlayProj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                overlayProj.space = local_;
+                overlayProj.viewCount = 2;
+                overlayProj.views = overlayViews;
+                layers.push_back((XrCompositionLayerBaseHeader*)&overlayProj);
             }
         }
 
@@ -648,42 +685,142 @@ private:
         if (XR_FAILED(xrLocateSpace(view_, local_, time, &loc)) ||
             !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) return;
         Vec3 fwd = rotate(loc.pose.orientation, {0, 0, -1});
-        float yaw = std::atan2(-fwd.x, -fwd.z);  // rotation about +Y that maps -Z to fwd
-        Vec3 head{loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
-        layout_ = yawTranslation(yaw, head);
-        layoutInv_ = rigidInverse(layout_);
-        floorY_ = -1.6f;  // grid ~1.6 m under eye level (LOCAL space has no floor)
+        layoutYaw_ = std::atan2(-fwd.x, -fwd.z);  // rotation about +Y that maps -Z to fwd
+        layoutPos_ = {loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
+        updateLayoutMatrix();
         layoutValid_ = true;
     }
 
-    // Asks Kotlin to upload new framebuffer content and lays out one screen per display.
+    void updateLayoutMatrix() {
+        layout_ = yawTranslation(layoutYaw_, layoutPos_);
+        layoutInv_ = rigidInverse(layout_);
+    }
+
+    // Takes the Kotlin staging textures, copies changed tiles into their cylinder swapchains and
+    // lays the screens out: display 1 as a 360° ring at eye level, others above it.
     void updateScreens() {
         auto arr = (jintArray)env_->CallObjectMethod(activity_, onFrame_);
         if (env_->ExceptionCheck()) { env_->ExceptionDescribe(); env_->ExceptionClear(); }
         if (!arr) return;
         jsize len = env_->GetArrayLength(arr);
-        jint* d = env_->GetIntArrayElements(arr, nullptr);
-        screenCount_ = std::min<int>(len / 3, kMaxDisplays);
-        float total = 0;
-        for (int i = 0; i < screenCount_; ++i) {
-            auto& s = screens_[i];
-            s.texture = (GLuint)d[i * 3];
-            s.width = d[i * 3 + 1] > 0 ? d[i * 3 + 1] : 1920;
-            s.height = d[i * 3 + 2] > 0 ? d[i * 3 + 2] : 1080;
-            total += (s.width / kPixelsPerMetre) / kRadius + (i ? kGap : 0);
-        }
-        env_->ReleaseIntArrayElements(arr, d, JNI_ABORT);
+        std::vector<jint> d(len);
+        env_->GetIntArrayRegion(arr, 0, len, d.data());
         env_->DeleteLocalRef(arr);
-        float theta = -total / 2;
+
+        size_t p = 0;
+        auto next = [&]() { return p < d.size() ? d[p++] : 0; };
+        screenCount_ = std::min<int>(next(), kMaxDisplays);
         for (int i = 0; i < screenCount_; ++i) {
-            auto& s = screens_[i];
-            float span = (s.width / kPixelsPerMetre) / kRadius;
-            float h = s.height / kPixelsPerMetre;
-            s.theta0 = theta;
-            s.theta1 = theta + span;
-            s.top = h / 2 - 0.1f;
-            s.bottom = s.top - h;
-            theta += span + kGap;
+            Screen& s = screens_[i];
+            s.width = next();
+            s.height = next();
+            s.tileW = next();
+            int tiles = std::min(next(), kMaxTiles);
+            int dirty = next();
+            s.sources.assign(tiles, 0);
+            for (int k = 0; k < tiles; ++k) s.sources[k] = (GLuint)next();
+            s.visible = tiles > 0 && s.width > 0 && s.height > 0;
+            if (!s.visible) continue;
+            if ((int)s.tiles.size() != tiles) {
+                for (auto& t : s.tiles) destroyTile(t);
+                s.tiles.assign(tiles, Tile{});
+            }
+            for (int k = 0; k < tiles; ++k) {
+                int tw = std::min(s.tileW, s.width - k * s.tileW);
+                Tile& t = s.tiles[k];
+                if (t.width != tw || t.height != s.height) {
+                    destroyTile(t);
+                    uint32_t mips = 1;
+                    for (int m = std::max(tw, s.height); m > 1; m >>= 1) ++mips;
+                    if (!createSwapchain(tw, s.height, mips, &t.swapchain, t.images, t.fbos)) continue;
+                    t.width = tw;
+                    t.height = s.height;
+                    dirty |= 1 << k;
+                }
+                if (dirty & (1 << k)) copyTile(t, s.sources[k]);
+            }
+        }
+
+        // Layout. Ring when display 1 is a wide multi-monitor desktop.
+        float pxPerRad = kDefaultPxPerRad;
+        Screen& ring = screens_[0];
+        bool isRing = screenCount_ > 0 && ring.visible && ring.width >= 4 * ring.height;
+        if (isRing) pxPerRad = ring.width / (2 * kPi);
+        float metresPerPx = kRadius / pxPerRad;  // arc length per pixel at the screen radius
+        float ringTop = 0;
+        for (int i = 0; i < screenCount_; ++i) {
+            Screen& s = screens_[i];
+            int w = s.visible ? s.width : 1920, h = s.visible ? s.height : 1080;
+            s.span = w / pxPerRad;
+            float hm = h * metresPerPx;
+            if (i == 0) {
+                // Ring: first monitor centred in front of the user.
+                s.theta0 = isRing ? -(s.tileW / 2.f) / pxPerRad : -s.span / 2;
+                s.top = hm / 2 - 0.1f;
+                s.bottom = s.top - hm;
+                ringTop = s.top;
+            } else {
+                static const float centres[] = {0, kPi / 2, -kPi / 2};
+                s.theta0 = centres[(i - 1) % 3] - s.span / 2;
+                s.bottom = ringTop + 0.12f;
+                s.top = s.bottom + hm;
+            }
+        }
+    }
+
+    void copyTile(Tile& t, GLuint source) {
+        if (!t.swapchain || !source) return;
+        uint32_t index = 0;
+        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (XR_FAILED(xrAcquireSwapchainImage(t.swapchain, &ai, &index))) return;
+        XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wi.timeout = XR_INFINITE_DURATION;
+        xrWaitSwapchainImage(t.swapchain, &wi);
+        // Swapchain images are recycled, so always copy the whole tile, not just the dirty rect.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo_);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, t.fbos[index]);
+        // Staging rows are top-down (X order) but GL swapchain images are bottom-up: flip here.
+        glBlitFramebuffer(0, 0, t.width, t.height, 0, t.height, t.width, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        // Mips let the compositor minify cleanly when a window is far or seen at a grazing angle.
+        glBindTexture(GL_TEXTURE_2D, t.images[index].image);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        xrReleaseSwapchainImage(t.swapchain, &ri);
+        t.hasContent = true;
+    }
+
+    void addCylinders(std::vector<XrCompositionLayerCylinderKHR>& cylinders, XrCompositionLayerSettingsFB& settings,
+                      std::vector<XrCompositionLayerBaseHeader*>& layers) {
+        for (int i = 0; i < screenCount_; ++i) {
+            const Screen& s = screens_[i];
+            if (!s.visible) continue;
+            float pxPerRad = s.width / s.span;
+            float height = s.top - s.bottom;
+            for (size_t k = 0; k < s.tiles.size(); ++k) {
+                const Tile& t = s.tiles[k];
+                if (!t.hasContent) continue;
+                float tSpan = t.width / pxPerRad;
+                float centre = s.theta0 + (k * s.tileW) / pxPerRad + tSpan / 2;
+                XrCompositionLayerCylinderKHR c{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+                c.next = hasLayerSettings_ ? &settings : nullptr;
+                // Windows are opaque, the bare root window is alpha 0 (passthrough shows through).
+                c.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                c.space = local_;
+                c.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                c.subImage.swapchain = t.swapchain;
+                c.subImage.imageRect = {{0, 0}, {t.width, t.height}};
+                c.pose.orientation = yawQuat(layoutYaw_ - centre);
+                c.pose.position = {layoutPos_.x, layoutPos_.y + (s.top + s.bottom) / 2, layoutPos_.z};
+                c.radius = kRadius;
+                c.centralAngle = tSpan;
+                c.aspectRatio = (kRadius * tSpan) / height;
+                cylinders.push_back(c);
+                layers.push_back((XrCompositionLayerBaseHeader*)&cylinders.back());
+            }
         }
     }
 
@@ -748,21 +885,34 @@ private:
             if (bstate.currentState && !h.secondaryPrev) layoutValid_ = false;  // recenter next frame
             h.secondaryPrev = bstate.currentState;
 
+            // Thumbstick left/right flick: spin the 360° desktop by 30° (no need to turn around).
+            XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+            gi.action = stickAction_;
+            xrGetActionStateVector2f(session_, &gi, &stick);
+            bool flick = stick.isActive && std::fabs(stick.currentState.x) > 0.7f && std::fabs(stick.currentState.y) < 0.5f;
+            if (flick && !h.stickXPrev && layoutValid_) {
+                layoutYaw_ += stick.currentState.x > 0 ? -kPi / 6 : kPi / 6;
+                updateLayoutMatrix();
+            }
+            h.stickXPrev = flick;
+
             // Hit test in layout space.
             h.hit = false;
             h.hitDisplay = -1;
             if (h.active && layoutValid_) {
-                Vec3 o = transformPoint(layoutInv_, h.origin), d = transformDir(layoutInv_, h.dir), p{};
-                if (intersect(o, d, p)) {
-                    float theta = std::atan2(p.x, -p.z);
+                Vec3 o = transformPoint(layoutInv_, h.origin), dl = transformDir(layoutInv_, h.dir), pt{};
+                if (intersect(o, dl, pt)) {
+                    float theta = std::atan2(pt.x, -pt.z);
                     for (int s = 0; s < screenCount_; ++s) {
                         const auto& sc = screens_[s];
-                        if (theta >= sc.theta0 && theta <= sc.theta1 && p.y <= sc.top && p.y >= sc.bottom) {
+                        if (!sc.visible) continue;
+                        float off = wrapPositive(theta - sc.theta0);
+                        if (off <= sc.span && pt.y <= sc.top && pt.y >= sc.bottom) {
                             h.hit = true;
                             h.hitDisplay = s;
-                            h.u = (theta - sc.theta0) / (sc.theta1 - sc.theta0);
-                            h.v = (sc.top - p.y) / (sc.top - sc.bottom);
-                            h.hitPoint = transformPoint(layout_, p);
+                            h.u = off / sc.span;
+                            h.v = (sc.top - pt.y) / (sc.top - sc.bottom);
+                            h.hitPoint = transformPoint(layout_, pt);
                             break;
                         }
                     }
@@ -813,19 +963,16 @@ private:
 
     // --- rendering ----------------------------------------------------------------------------
 
-    void drawColor(const Mat4& mvp, const std::vector<float>& verts, GLenum mode, const float color[4],
-                   float pointSize = 1, float fadeRadius = 0, Vec3 fadeCenter = {}) {
+    void drawColor(const Mat4& mvp, const std::vector<float>& verts, GLenum mode, const float color[4], float pointSize = 1) {
         glUseProgram(colorProg_);
         glUniformMatrix4fv(glGetUniformLocation(colorProg_, "uMvp"), 1, GL_FALSE, mvp.m);
         glUniform4fv(glGetUniformLocation(colorProg_, "uColor"), 1, color);
         glUniform1f(glGetUniformLocation(colorProg_, "uPointSize"), pointSize);
-        glUniform1f(glGetUniformLocation(colorProg_, "uFadeRadius"), fadeRadius);
-        glUniform3f(glGetUniformLocation(colorProg_, "uFadeCenter"), fadeCenter.x, fadeCenter.y, fadeCenter.z);
+        glUniform1f(glGetUniformLocation(colorProg_, "uFadeRadius"), 0);
         glBindBuffer(GL_ARRAY_BUFFER, lineVbo_);
         glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size() * sizeof(float)), verts.data(), GL_STREAM_DRAW);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
         glEnableVertexAttribArray(0);
-        glDisableVertexAttribArray(1);
         glDrawArrays(mode, 0, (GLsizei)(verts.size() / 3));
     }
 
@@ -839,8 +986,7 @@ private:
             glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g.size() * sizeof(float)), g.data(), GL_STATIC_DRAW);
             gridVertexCount_ = (GLsizei)(g.size() / 3);
         }
-        Mat4 model = mul(layout_, yawTranslation(0, {0, floorY_, 0}));
-        Mat4 mvp = mul(viewProj, model);
+        Mat4 mvp = mul(viewProj, mul(layout_, yawTranslation(0, {0, floorY_, 0})));
         const float color[4] = {0.25f, 0.45f, 0.9f, 0.55f};
         glUseProgram(colorProg_);
         glUniformMatrix4fv(glGetUniformLocation(colorProg_, "uMvp"), 1, GL_FALSE, mvp.m);
@@ -851,37 +997,7 @@ private:
         glBindBuffer(GL_ARRAY_BUFFER, gridVbo_);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
         glEnableVertexAttribArray(0);
-        glDisableVertexAttribArray(1);
         glDrawArrays(GL_LINES, 0, gridVertexCount_);
-    }
-
-    void drawScreens(const Mat4& viewProj) {
-        Mat4 mvp = mul(viewProj, layout_);
-        glUseProgram(screenProg_);
-        glUniformMatrix4fv(glGetUniformLocation(screenProg_, "uMvp"), 1, GL_FALSE, mvp.m);
-        glUniform1i(glGetUniformLocation(screenProg_, "uTex"), 0);
-        glActiveTexture(GL_TEXTURE0);
-        for (int s = 0; s < screenCount_; ++s) {
-            const auto& sc = screens_[s];
-            std::vector<float> v;
-            v.reserve((kSegments + 1) * 10);
-            for (int i = 0; i <= kSegments; ++i) {
-                float u = (float)i / kSegments;
-                float th = sc.theta0 + u * (sc.theta1 - sc.theta0);
-                float x = kRadius * std::sin(th), z = -kRadius * std::cos(th);
-                v.insert(v.end(), {x, sc.top, z, u, 0.f, x, sc.bottom, z, u, 1.f});
-            }
-            const float placeholder[4] = {0.12f, 0.12f, 0.16f, 1.f}, none[4] = {0, 0, 0, 0};
-            glUniform4fv(glGetUniformLocation(screenProg_, "uTint"), 1, sc.texture ? none : placeholder);
-            glBindTexture(GL_TEXTURE_2D, sc.texture);
-            glBindBuffer(GL_ARRAY_BUFFER, screenVbo_);
-            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 20, nullptr);
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 20, (void*)12);
-            glEnableVertexAttribArray(0);
-            glEnableVertexAttribArray(1);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, (GLsizei)(v.size() / 5));
-        }
     }
 
     void drawPointers(const Mat4& viewProj) {
@@ -898,8 +1014,8 @@ private:
         }
     }
 
-    void renderEye(int eye, const XrView& view) {
-        auto& sc = swapchains_[eye];
+    // environment = true: dark room + floor grid (opaque). false: transparent overlay with rays.
+    void renderEye(Swapchain& sc, XrCompositionLayerProjectionView& pv, const XrView& view, bool environment) {
         uint32_t index = 0;
         XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         xrAcquireSwapchainImage(sc.handle, &ai, &index);
@@ -911,22 +1027,27 @@ private:
         glViewport(0, 0, sc.width, sc.height);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
-        if (passthroughOn_) glClearColor(0, 0, 0, 0);
-        else glClearColor(0.008f, 0.009f, 0.015f, 1);
+        if (environment) glClearColor(0.008f, 0.009f, 0.015f, 1);
+        else glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         glEnable(GL_BLEND);
-        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);  // premultiplied
 
         Mat4 viewProj = mul(projection(view.fov, 0.05f, 100.f), rigidInverse(poseMatrix(view.pose)));
-        if (layoutValid_) {
-            if (!passthroughOn_) drawGrid(viewProj);
-            drawScreens(viewProj);
+        if (environment) {
+            if (layoutValid_) drawGrid(viewProj);
+        } else {
+            drawPointers(viewProj);
         }
-        drawPointers(viewProj);
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(sc.handle, &ri);
+
+        pv.pose = view.pose;
+        pv.fov = view.fov;
+        pv.subImage.swapchain = sc.handle;
+        pv.subImage.imageRect = {{0, 0}, {sc.width, sc.height}};
     }
 };
 

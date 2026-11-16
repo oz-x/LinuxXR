@@ -35,10 +35,15 @@ flowchart LR
 | Emulación | [PRoot](https://github.com/termux/proot) (fork de Termux) compilado con el NDK desde un commit fijado. Se empaqueta como `libproot.so` y `libproot-loader.so`, porque desde API 29 una app no puede ejecutar binarios desde sus datos. Sin root y sin KVM. |
 | Escritorios | TigerVNC `Xvnc` + XFCE, uno por display (1–4). Cada uno escucha en `/run/linuxxr/display-N.sock`, un socket Unix privado de la app: ninguna otra app del Quest puede conectarse. |
 | Paneles | `DesktopActivity`: cliente RFB propio (Raw, CopyRect, ExtendedDesktopSize) que dibuja con OpenGL ES 3 y solo sube a la textura la zona que cambió. El escritorio remoto se redimensiona al tamaño del panel para que cada píxel sea 1:1. |
-| VR inmersivo | `ImmersiveActivity` + `xr_main.cpp` (OpenXR, loader Khronos 1.1.65). Renderiza **por separado cada ojo** con la pose y el FOV de cada uno (estéreo 3D real, con seguimiento de cabeza). Todos los escritorios aparecen como pantallas curvas a 1,8 m, alrededor del usuario, sobre un entorno oscuro con suelo en rejilla. El passthrough (`XR_FB_passthrough`) es opcional. Las texturas son sRGB con mipmaps y filtrado anisotrópico para que el texto se lea bien a distancia. |
+| VR inmersivo | `ImmersiveActivity` + `xr_main.cpp` (OpenXR, loader Khronos 1.1.65), estéreo 3D con seguimiento de cabeza. El display `:1` se convierte en un **escritorio de 360°**: 6 monitores RandR de 1440×1200 (8640 px = 24 px/°, un píxel del escritorio por píxel de la pantalla del Quest 3) envueltos a tu alrededor a 1,8 m. Las ventanas se colocan y maximizan en cualquier dirección. Los displays 2–4 flotan encima. Por defecto el fondo es **passthrough**: no hay fondo de escritorio, la ventana raíz de X se pinta con un color clave que se vuelve transparente, así que solo flotan las ventanas en tu habitación. |
+| Nitidez | Cada columna del escritorio es una capa `XR_KHR_composition_layer_cylinder` que el compositor de Meta muestrea directamente, sin pasar por el buffer de ojo (que tiene resolución dinámica y foveated), con mipmaps y `XR_FB_composition_layer_settings` (supersampling + sharpening). |
 | Entrada | Rayo y gatillo del mando o pinch de las manos → ratón. Joystick → rueda. Teclado del sistema o teclado Bluetooth → keysyms X11. La barra superior tiene Esc, Tab, Ctrl, Alt, Super y Shift (fijos hasta la siguiente tecla), flechas, clic derecho y pegar. |
 | GPU | `linuxxr gpu build` compila Mesa 26.2.7 dentro del Quest: Turnip con KMD **KGSL** (`/dev/kgsl-3d0`) y Zink para OpenGL. Se instala en `/opt/linuxxr/mesa`, aparte del Mesa de Arch, así que `pacman -Syu` no lo pisa. |
 | Agentes | `agentd` (Python, sin dependencias externas) es un servidor MCP (Streamable HTTP) con estas herramientas: `screenshot`, `click`, `move`, `drag`, `scroll`, `type`, `key`, `run`, `read_file`, `write_file`, `list_displays`. Exige token Bearer y valida `Origin`. |
+
+## Carpeta compartida
+
+Pulsa **Activar carpeta compartida con el Quest** y concede "Acceso a todos los archivos". El almacenamiento del visor (Download, DCIM, Pictures, Oculus/Screenshots, etc.) aparece en Linux como `~/Quest` y como `/sdcard`. Reinicia Linux tras concederlo.
 
 ## Compilar
 
@@ -67,7 +72,8 @@ El APK queda en *Biblioteca → Fuentes desconocidas* del Quest.
 | Gatillo | Clic izquierdo (mantener = arrastrar) |
 | Grip | Clic derecho |
 | Joystick ↑/↓ | Rueda (scroll) |
-| A / X | Alterna entre entorno virtual y passthrough (realidad mixta) |
+| Joystick ←/→ | Gira todo el escritorio 30° (para traer lo de detrás sin girarte) |
+| A / X | Alterna entre passthrough y un entorno virtual oscuro con suelo |
 | B / Y | Recentra las pantallas delante de ti |
 | Teclado Bluetooth | Escribe en la pantalla a la que apuntaste por última vez |
 

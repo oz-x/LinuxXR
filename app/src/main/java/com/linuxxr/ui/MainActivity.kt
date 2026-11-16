@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private lateinit var desktops: LinearLayout
     private lateinit var agentInfo: TextView
     private lateinit var log: TextView
+    private lateinit var storageButton: Button
     private lateinit var logScroll: ScrollView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,6 +76,7 @@ class MainActivity : Activity() {
                 }
             }
         }
+        storageButton = Button(this).apply { setOnClickListener { requestSharedStorage() } }
         log = text(12f).apply {
             typeface = Typeface.MONOSPACE
             setTextColor(Color.rgb(170, 220, 170))
@@ -95,6 +97,7 @@ class MainActivity : Activity() {
             addView(desktops)
             addView(agentInfo)
             addView(copyToken)
+            addView(storageButton)
             addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
@@ -112,6 +115,18 @@ class MainActivity : Activity() {
                 logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        storageButton.text = if (Guest(this).hasSharedStorage) "Carpeta compartida: ~/Quest ✓ (reinicia Linux si acabas de activarla)"
+        else "Activar carpeta compartida con el Quest (~/Quest)"
+    }
+
+    private fun requestSharedStorage() {
+        if (Guest(this).hasSharedStorage) return
+        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            android.net.Uri.parse("package:$packageName")))
     }
 
     override fun onStop() {

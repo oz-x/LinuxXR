@@ -13,10 +13,16 @@ import java.nio.ByteOrder
  * Security "None" only (the socket lives in the app's private data dir).
  * Encodings: Raw, CopyRect, DesktopSize, ExtendedDesktopSize.
  *
- * Framebuffer pixels are stored as R,G,B,X bytes (row-major, stride = width * 4) so the
+ * Framebuffer pixels are stored as R,G,B,A bytes (row-major, stride = width * 4) so the
  * renderer can upload them directly as GL_RGBA.
  */
-class RfbClient(input: InputStream, private val output: OutputStream, private val listener: Listener) {
+class RfbClient(
+    input: InputStream,
+    private val output: OutputStream,
+    private val listener: Listener,
+    /** 0xRRGGBB rendered fully transparent (alpha 0); null = everything opaque. */
+    private val transparentKey: Int? = null,
+) {
 
     interface Listener {
         fun onResize(width: Int, height: Int) {}
@@ -148,17 +154,43 @@ class RfbClient(input: InputStream, private val output: OutputStream, private va
     }
 
     private fun readRaw(x: Int, y: Int, w: Int, h: Int) {
+        // Row by row: a 360° desktop is ~75 MB, so never buffer a whole rect twice, and never
+        // hold the lock while blocked on the socket (the VR renderer takes it every frame).
         val rowBytes = w * 4
-        val total = rowBytes * h
-        if (scratch.size < total) scratch = ByteArray(total)
-        inp.readFully(scratch, 0, total)
-        synchronized(lock) {
-            if (x + w > width || y + h > height) return
-            val stride = width * 4
-            for (row in 0 until h) {
-                System.arraycopy(scratch, row * rowBytes, framebuffer, (y + row) * stride + x * 4, rowBytes)
+        if (scratch.size < rowBytes) scratch = ByteArray(rowBytes)
+        for (row in 0 until h) {
+            inp.readFully(scratch, 0, rowBytes)
+            applyAlpha(scratch, rowBytes)
+            synchronized(lock) {
+                if (x + w <= width && y + h <= height) {
+                    System.arraycopy(scratch, 0, framebuffer, ((y + row) * width + x) * 4, rowBytes)
+                }
             }
-            markDirty(x, y, w, h)
+        }
+        synchronized(lock) { if (x + w <= width && y + h <= height) markDirty(x, y, w, h) }
+    }
+
+    /**
+     * Fills the padding byte as alpha: opaque, except pixels of exactly [transparentKey], which
+     * become (0,0,0,0) so VR can show passthrough through the bare X root window.
+     */
+    private fun applyAlpha(buf: ByteArray, len: Int) {
+        val key = transparentKey
+        var i = 0
+        if (key == null) {
+            while (i < len) { buf[i + 3] = -1; i += 4 }
+            return
+        }
+        val kr = (key shr 16 and 0xff).toByte()
+        val kg = (key shr 8 and 0xff).toByte()
+        val kb = (key and 0xff).toByte()
+        while (i < len) {
+            if (buf[i] == kr && buf[i + 1] == kg && buf[i + 2] == kb) {
+                buf[i] = 0; buf[i + 1] = 0; buf[i + 2] = 0; buf[i + 3] = 0
+            } else {
+                buf[i + 3] = -1
+            }
+            i += 4
         }
     }
 
@@ -233,15 +265,26 @@ class RfbClient(input: InputStream, private val output: OutputStream, private va
         }.array())
     }
 
+    val canSetDesktopSize: Boolean get() = supportsSetDesktopSize
+
     /** Asks the server to resize the remote desktop. Returns false if the server can't. */
-    fun requestDesktopSize(w: Int, h: Int): Boolean {
-        if (!supportsSetDesktopSize || w <= 0 || h <= 0) return false
-        write(ByteBuffer.allocate(24).order(ByteOrder.BIG_ENDIAN).apply {
+    fun requestDesktopSize(w: Int, h: Int): Boolean = requestDesktopLayout(w, h, listOf(intArrayOf(0, 0, w, h)))
+
+    /**
+     * Asks for a [w]x[h] desktop split into monitors (each `[x, y, width, height]`). Xvnc turns
+     * them into RandR outputs, so the window manager maximizes and places windows per monitor.
+     */
+    fun requestDesktopLayout(w: Int, h: Int, screens: List<IntArray>): Boolean {
+        if (!supportsSetDesktopSize || w <= 0 || h <= 0 || screens.isEmpty()) return false
+        write(ByteBuffer.allocate(8 + 16 * screens.size).order(ByteOrder.BIG_ENDIAN).apply {
             put(251.toByte()); put(0)
             putShort(w.toShort()); putShort(h.toShort())
-            put(1); put(0)
-            putInt(screenId.toInt()); putShort(0); putShort(0)
-            putShort(w.toShort()); putShort(h.toShort()); putInt(0)
+            put(screens.size.toByte()); put(0)
+            screens.forEachIndexed { i, (sx, sy, sw, sh) ->
+                putInt(if (i == 0) screenId.toInt() else i + 1)
+                putShort(sx.toShort()); putShort(sy.toShort())
+                putShort(sw.toShort()); putShort(sh.toShort()); putInt(0)
+            }
         }.array())
         return true
     }

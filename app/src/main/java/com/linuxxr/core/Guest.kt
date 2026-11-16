@@ -27,6 +27,10 @@ class Guest(private val context: Context) {
     /** Host path of the VNC socket that Xvnc for display [n] creates at /run/linuxxr/display-n.sock. */
     fun displaySocket(n: Int) = File(rootfs, "run/linuxxr/display-$n.sock")
 
+    /** True once the user granted "All files access" (needed to see the headset's storage). */
+    val hasSharedStorage: Boolean
+        get() = android.os.Environment.isExternalStorageManager() && File(SHARED_STORAGE).canRead()
+
     val agentToken: String?
         get() = File(rootfs, "etc/linuxxr/agent-token").takeIf { it.canRead() }?.readText()?.trim()
 
@@ -138,7 +142,11 @@ class Guest(private val context: Context) {
             "--bind=${shm.path}:/dev/shm",
         )
         args += procBinds()
-        if (File("/storage/emulated/0").canRead()) args += "--bind=/storage/emulated/0:/sdcard"
+        // Quest shared storage (Downloads, Pictures, Oculus/Screenshots…) as ~/Quest and /sdcard.
+        if (hasSharedStorage) {
+            args += "--bind=$SHARED_STORAGE:/root/Quest"
+            args += "--bind=$SHARED_STORAGE:/sdcard"
+        }
         args += listOf(
             "/usr/bin/env", "-i",
             "HOME=/root", "USER=root", "LOGNAME=root", "SHELL=/bin/bash",
@@ -173,5 +181,6 @@ class Guest(private val context: Context) {
 
     companion object {
         const val KERNEL_RELEASE = "6.17.0-linuxxr"
+        const val SHARED_STORAGE = "/storage/emulated/0"
     }
 }

@@ -64,46 +64,33 @@ El APK queda en *Biblioteca → Fuentes desconocidas* del Quest.
    - **Modo VR inmersivo (3D)**: todos los escritorios a tu alrededor, en estéreo.
    - **Abrir escritorio :N**: cada escritorio es un panel 2D distinto de Horizon OS.
 
-### Controles en VR
+### Controles en VR (mandos Touch)
 
 | Mando | Acción |
 |---|---|
-| Apuntar | Mueve el puntero (el láser se apoya en la pantalla) |
-| Gatillo | Clic izquierdo (mantener = arrastrar) |
-| Grip | Clic derecho |
-| Joystick ↑/↓ | Rueda (scroll) |
-| Joystick ←/→ | Gira todo el escritorio 30° (para traer lo de detrás sin girarte) |
-| A / X | Alterna entre passthrough y un entorno virtual oscuro con suelo |
-| B / Y | Recentra las pantallas delante de ti |
-| Teclado Bluetooth | Escribe en la pantalla a la que apuntaste por última vez |
+| Apuntar | Mueve el puntero (rayo suavizado contra el temblor de la mano) |
+| Gatillo | Clic izquierdo (mantener = arrastrar). El puntero se queda quieto 140 ms al pulsar, para que el clic no se desplace |
+| Grip (mantener) | Agarra la ventana bajo el rayo y la mueve (Alt+arrastrar), a cualquier punto de los 360° |
+| A / X | Clic derecho |
+| B / Y | Abre o cierra el teclado virtual |
+| Joystick ↑/↓ | Scroll |
+| Joystick ←/→ | Gira todo el escritorio 30° |
+| Clic joystick izquierdo | Passthrough ↔ entorno virtual |
+| Clic joystick derecho | Recentra |
+| Teclado Bluetooth | Escribe en el escritorio al que apuntaste por última vez |
 
-3. En una terminal de XFCE:
+### Teclado virtual y dictado
 
-```bash
-linuxxr agents install claude codex gemini   # CLIs de agentes (npm global)
-linuxxr gpu build                            # una sola vez; compila Mesa en el Quest
-linuxxr gpu status                           # comprueba el renderer (tras reiniciar la sesión)
-linuxxr token                                # token del puente MCP
-linuxxr tunnel usuario@mi-servidor           # publica agentd en mi-servidor:127.0.0.1:7777
-```
+B/Y abre un teclado flotante delante de ti, inclinado como un teclado real. Se pulsa con el rayo y el gatillo, con vibración al pasar por cada tecla. Ctrl, Alt y Super se quedan fijos hasta la siguiente tecla.
 
-### Conectar un agente en la nube
-
-En el servidor donde corre el agente, con `linuxxr tunnel` activo:
-
-```bash
-claude mcp add --transport http linuxxr http://127.0.0.1:7777/mcp \
-  --header "Authorization: Bearer <token>"
-```
-
-El agente ve y controla los escritorios (`screenshot` y `click` con `display: ":2"`, etc.) y puede ejecutar comandos en Arch.
+**🎤 Dictar** usa el reconocimiento de voz de Horizon OS y escribe lo que dices en la ventana activa. La barra superior muestra la transcripción en directo. Sigue escuchando hasta que vuelves a pulsar 🎤. El permiso de micrófono se pide al abrir LinuxXR.
 
 ## Limitaciones conocidas
 
 - PRoot intercepta las syscalls con ptrace. Las tareas que hacen mucha E/S (compilar, `pacman`) van más lentas que en nativo; el código de usuario corre a velocidad nativa (arm64).
 - Xvnc no tiene DRI3. Turnip y Zink renderizan en la GPU, pero presentan copiando por CPU (`MESA_VK_WSI_DEBUG=sw`, `LIBGL_KOPPER_DRI2=true`). Para escritorio, navegador y agentes es suficiente; para juegos no.
 - Chromium corre con `--no-sandbox`, porque PRoot no tiene namespaces.
-- En VR solo se escribe con teclado Bluetooth. El teclado virtual de Meta no está integrado; para teclear sin teclado físico usa el modo panel. Las manos (sin mandos) solo funcionan si el runtime las expone como `khr/simple_controller`.
+- Las manos sin mandos solo funcionan si el runtime las expone como `khr/simple_controller`.
 - Horizon OS puede cerrar la app si se queda sin memoria. La sesión corre en un servicio en primer plano para reducir ese riesgo.
 
 ## Licencias

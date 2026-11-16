@@ -43,7 +43,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         displays = getPreferences(MODE_PRIVATE).getInt(PREF_DISPLAYS, 1)
-        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+        // Microphone up front: the immersive mode cannot show the permission dialog.
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.RECORD_AUDIO), 0)
 
         val pad = 24
         fun text(size: Float, bold: Boolean = false) = TextView(this).apply {

@@ -17,6 +17,9 @@ ln -sf /usr/local/bin/bwrap /usr/bin/bwrap
 grep -q '^NoExtract.*usr/bin/bwrap' /etc/pacman.conf || sed -i '/^\[options\]/a NoExtract = usr/bin/bwrap' /etc/pacman.conf
 [ -r /etc/profile.d/linuxxr-gpu.sh ] && . /etc/profile.d/linuxxr-gpu.sh
 
+# Agent CLIs (claude, omp) install to ~/.local/bin; terminals start non-login shells.
+grep -qs 'HOME/.local/bin' /root/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
+export PATH="/root/.local/bin:$PATH"
 dbus-uuidgen --ensure 2>/dev/null || true   # xfconf/dbus need a machine-id
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null; wait; }

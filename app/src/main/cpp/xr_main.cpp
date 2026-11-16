@@ -3,9 +3,8 @@
 // Display :1 is a 360° desktop (six RandR monitors side by side) wrapped all around the user;
 // other displays sit above it. Desktop tiles are OpenXR cylinder composition layers sampled
 // directly by the compositor (sharpest path for text); passthrough is the background, and the
-// bare X root window is transparent so windows float in the room. Controllers: trigger = left
-// click, grip = right click, stick up/down = scroll, stick left/right = spin the desktop 30°,
-// A/X = passthrough on/off, B/Y = recenter. Uploads happen in Kotlin (ImmersiveActivity.onFrame)
+// bare X root window is transparent so windows float in the room. Controls: see handleInput().
+// Uploads happen in Kotlin (ImmersiveActivity.onFrame)
 // on this thread, with this EGL context current.
 
 #include <jni.h>
@@ -212,7 +211,13 @@ struct Hand {
     int hitDisplay = -1;
     float u = 0, v = 0;
     bool trigger = false, grip = false;
-    bool primaryPrev = false, secondaryPrev = false, stickXPrev = false;
+    bool rightClick = false;                 // A / X
+    bool keyboardPrev = false, stickClickPrev = false, stickXPrev = false;
+    bool onKeyboard = false;
+    Vec3 smoothDir{0, 0, -1};
+    // Click stabilisation: hold the pointer still for a moment after a press so clicks don't drift.
+    std::chrono::steady_clock::time_point lockUntil{};
+    float lockU = 0, lockV = 0;
 };
 
 float wrapPositive(float a) {
@@ -235,6 +240,8 @@ public:
         onFrame_ = env->GetMethodID(cls, "onFrame", "()[I");
         onPointer_ = env->GetMethodID(cls, "onPointer", "(IFFI)V");
         onScroll_ = env->GetMethodID(cls, "onScroll", "(IFFZ)V");
+        onKeyboardFrame_ = env->GetMethodID(cls, "onKeyboardFrame", "()[I");
+        onKeyboardPointer_ = env->GetMethodID(cls, "onKeyboardPointer", "(FFZ)I");
     }
 
     bool run(JavaVM* vm) {
@@ -251,6 +258,7 @@ public:
 
     ~App() {
         for (auto& s : screens_) for (auto& t : s.tiles) destroyTile(t);
+        destroyTile(kbTile_);
         if (passthroughLayer_) destroyPassthroughLayer_(passthroughLayer_);
         if (passthrough_) destroyPassthrough_(passthrough_);
         for (auto* set : {env_layer_, overlay_})
@@ -275,7 +283,7 @@ private:
 
     JNIEnv* env_;
     jobject activity_;
-    jmethodID onFrame_, onPointer_, onScroll_;
+    jmethodID onFrame_, onPointer_, onScroll_, onKeyboardFrame_, onKeyboardPointer_;
 
     XrInstance instance_ = XR_NULL_HANDLE;
     XrSystemId system_ = XR_NULL_SYSTEM_ID;
@@ -295,7 +303,8 @@ private:
 
     XrActionSet actionSet_ = XR_NULL_HANDLE;
     XrAction aimAction_ = XR_NULL_HANDLE, triggerAction_ = XR_NULL_HANDLE, gripAction_ = XR_NULL_HANDLE,
-             stickAction_ = XR_NULL_HANDLE, primaryAction_ = XR_NULL_HANDLE, secondaryAction_ = XR_NULL_HANDLE,
+             stickAction_ = XR_NULL_HANDLE, rightClickAction_ = XR_NULL_HANDLE, keyboardAction_ = XR_NULL_HANDLE,
+             stickClickAction_ = XR_NULL_HANDLE,
              hapticAction_ = XR_NULL_HANDLE;
     Hand hands_[2];
     int activeHand_ = 1;
@@ -315,6 +324,14 @@ private:
     GLuint colorProg_ = 0, lineVbo_ = 0, gridVbo_ = 0, readFbo_ = 0;
     GLsizei gridVertexCount_ = 0;
 
+    // Virtual keyboard: a quad layer placed in front of and below the user when opened.
+    bool kbVisible_ = false;
+    XrPosef kbPose_{};
+    Mat4 kbInv_ = identity();
+    Tile kbTile_;
+    static constexpr float kKbWidth = 0.62f;
+    float kbHeight_ = 0.25f;
+
     Screen screens_[kMaxDisplays];
     int screenCount_ = 0;
     bool layoutValid_ = false;
@@ -323,6 +340,8 @@ private:
     Mat4 layout_ = identity(), layoutInv_ = identity();
     float floorY_ = -1.6f;
 
+    bool keyboardHovered_ = false;
+    static constexpr int kMoveWindow = 0x100;  // ImmersiveActivity.MOVE_WINDOW
     int lastPointerDisplay_ = -1, lastPx_ = -1, lastPy_ = -1, lastButtons_ = -1;
     std::chrono::steady_clock::time_point lastScroll_{};
 
@@ -500,10 +519,11 @@ private:
         XR_CHECK(xrCreateActionSet(instance_, &asci, &actionSet_));
         if (!createAction(&aimAction_, XR_ACTION_TYPE_POSE_INPUT, "aim", "Aim") ||
             !createAction(&triggerAction_, XR_ACTION_TYPE_FLOAT_INPUT, "click", "Click") ||
-            !createAction(&gripAction_, XR_ACTION_TYPE_FLOAT_INPUT, "right_click", "Right click") ||
+            !createAction(&gripAction_, XR_ACTION_TYPE_FLOAT_INPUT, "grab_window", "Grab window") ||
             !createAction(&stickAction_, XR_ACTION_TYPE_VECTOR2F_INPUT, "scroll_rotate", "Scroll / rotate") ||
-            !createAction(&primaryAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "toggle_passthrough", "Toggle passthrough") ||
-            !createAction(&secondaryAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "recenter", "Recenter") ||
+            !createAction(&rightClickAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "right_click_button", "Right click (A/X)") ||
+            !createAction(&keyboardAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "keyboard", "Keyboard (B/Y)") ||
+            !createAction(&stickClickAction_, XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click", "Passthrough / recenter") ||
             !createAction(&hapticAction_, XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Haptic"))
             return false;
 
@@ -512,8 +532,9 @@ private:
             {triggerAction_, path("/user/hand/left/input/trigger/value")}, {triggerAction_, path("/user/hand/right/input/trigger/value")},
             {gripAction_, path("/user/hand/left/input/squeeze/value")}, {gripAction_, path("/user/hand/right/input/squeeze/value")},
             {stickAction_, path("/user/hand/left/input/thumbstick")}, {stickAction_, path("/user/hand/right/input/thumbstick")},
-            {primaryAction_, path("/user/hand/left/input/x/click")}, {primaryAction_, path("/user/hand/right/input/a/click")},
-            {secondaryAction_, path("/user/hand/left/input/y/click")}, {secondaryAction_, path("/user/hand/right/input/b/click")},
+            {rightClickAction_, path("/user/hand/left/input/x/click")}, {rightClickAction_, path("/user/hand/right/input/a/click")},
+            {keyboardAction_, path("/user/hand/left/input/y/click")}, {keyboardAction_, path("/user/hand/right/input/b/click")},
+            {stickClickAction_, path("/user/hand/left/input/thumbstick/click")}, {stickClickAction_, path("/user/hand/right/input/thumbstick/click")},
             {hapticAction_, path("/user/hand/left/output/haptic")}, {hapticAction_, path("/user/hand/right/output/haptic")},
         };
         XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -525,7 +546,7 @@ private:
         std::vector<XrActionSuggestedBinding> simple{
             {aimAction_, path("/user/hand/left/input/aim/pose")}, {aimAction_, path("/user/hand/right/input/aim/pose")},
             {triggerAction_, path("/user/hand/left/input/select/click")}, {triggerAction_, path("/user/hand/right/input/select/click")},
-            {secondaryAction_, path("/user/hand/left/input/menu/click")},
+            {keyboardAction_, path("/user/hand/left/input/menu/click")},
             {hapticAction_, path("/user/hand/left/output/haptic")}, {hapticAction_, path("/user/hand/right/output/haptic")},
         };
         sb.interactionProfile = path("/interaction_profiles/khr/simple_controller");
@@ -663,6 +684,18 @@ private:
                     layers.push_back((XrCompositionLayerBaseHeader*)&envProj);
                 }
                 if (layoutValid_) addCylinders(cylinders, settings, layers);
+                XrCompositionLayerQuad kbQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+                if (kbVisible_ && kbTile_.hasContent) {
+                    kbQuad.next = hasLayerSettings_ ? &settings : nullptr;
+                    kbQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                    kbQuad.space = local_;
+                    kbQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    kbQuad.subImage.swapchain = kbTile_.swapchain;
+                    kbQuad.subImage.imageRect = {{0, 0}, {kbTile_.width, kbTile_.height}};
+                    kbQuad.pose = kbPose_;
+                    kbQuad.size = {kKbWidth, kbHeight_};
+                    layers.push_back((XrCompositionLayerBaseHeader*)&kbQuad);
+                }
                 for (int eye = 0; eye < 2; ++eye) renderEye(overlay_[eye], overlayViews[eye], views[eye], false);
                 overlayProj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                 overlayProj.space = local_;
@@ -741,6 +774,8 @@ private:
             }
         }
 
+        if (kbVisible_) updateKeyboardTexture();
+
         // Layout. Ring when display 1 is a wide multi-monitor desktop.
         float pxPerRad = kDefaultPxPerRad;
         Screen& ring = screens_[0];
@@ -768,7 +803,58 @@ private:
         }
     }
 
-    void copyTile(Tile& t, GLuint source) {
+    void updateKeyboardTexture() {
+        auto arr = (jintArray)env_->CallObjectMethod(activity_, onKeyboardFrame_);
+        if (env_->ExceptionCheck()) { env_->ExceptionDescribe(); env_->ExceptionClear(); }
+        if (!arr) return;
+        jint k[4];
+        env_->GetIntArrayRegion(arr, 0, 4, k);
+        env_->DeleteLocalRef(arr);
+        if (kbTile_.width != k[1] || kbTile_.height != k[2]) {
+            destroyTile(kbTile_);
+            if (!createSwapchain(k[1], k[2], 1, &kbTile_.swapchain, kbTile_.images, kbTile_.fbos)) return;
+            kbTile_.width = k[1];
+            kbTile_.height = k[2];
+            k[3] = 1;
+        }
+        kbHeight_ = kKbWidth * k[2] / k[1];
+        if (k[3]) copyTile(kbTile_, (GLuint)k[0], false);
+    }
+
+    void openKeyboard(XrTime time) {
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        if (XR_FAILED(xrLocateSpace(view_, local_, time, &loc)) ||
+            !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) return;
+        Vec3 fwd = rotate(loc.pose.orientation, {0, 0, -1});
+        float yaw = std::atan2(-fwd.x, -fwd.z);
+        // 50 cm ahead, 35 cm below the eyes, tilted 35° up toward the face (like a real keyboard).
+        float pitch = -35.f * kPi / 180;
+        XrQuaternionf qy = yawQuat(yaw), qp{std::sin(pitch / 2), 0, 0, std::cos(pitch / 2)};
+        kbPose_.orientation = {qy.w * qp.x + qy.x * qp.w + qy.y * qp.z - qy.z * qp.y,
+                               qy.w * qp.y - qy.x * qp.z + qy.y * qp.w + qy.z * qp.x,
+                               qy.w * qp.z + qy.x * qp.y - qy.y * qp.x + qy.z * qp.w,
+                               qy.w * qp.w - qy.x * qp.x - qy.y * qp.y - qy.z * qp.z};
+        kbPose_.position = {loc.pose.position.x - std::sin(yaw) * 0.5f, loc.pose.position.y - 0.35f,
+                            loc.pose.position.z - std::cos(yaw) * 0.5f};
+        kbInv_ = rigidInverse(poseMatrix(kbPose_));
+        kbVisible_ = true;
+    }
+
+    // Ray vs keyboard quad (local z = 0 plane, visible from +z). Returns (u, v) in [0,1].
+    bool hitKeyboard(const Hand& h, float& u, float& v, Vec3& hit) const {
+        if (!kbVisible_ || !kbTile_.hasContent) return false;
+        Vec3 o = transformPoint(kbInv_, h.origin), d = transformDir(kbInv_, h.dir);
+        if (d.z >= -1e-4f || o.z <= 0) return false;
+        float t = -o.z / d.z;
+        Vec3 p = o + d * t;
+        u = p.x / kKbWidth + 0.5f;
+        v = 0.5f - p.y / kbHeight_;
+        if (u < 0 || u > 1 || v < 0 || v > 1) return false;
+        hit = h.origin + h.dir * t;
+        return true;
+    }
+
+    void copyTile(Tile& t, GLuint source, bool mipmaps = true) {
         if (!t.swapchain || !source) return;
         uint32_t index = 0;
         XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -785,9 +871,11 @@ private:
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         // Mips let the compositor minify cleanly when a window is far or seen at a grazing angle.
-        glBindTexture(GL_TEXTURE_2D, t.images[index].image);
-        glGenerateMipmap(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, 0);
+        if (mipmaps) {
+            glBindTexture(GL_TEXTURE_2D, t.images[index].image);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(t.swapchain, &ri);
         t.hasContent = true;
@@ -838,56 +926,87 @@ private:
         return true;
     }
 
+    bool readBool(XrAction action, XrPath sub) {
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = action;
+        gi.subactionPath = sub;
+        XrActionStateBoolean b{XR_TYPE_ACTION_STATE_BOOLEAN};
+        xrGetActionStateBoolean(session_, &gi, &b);
+        return b.isActive && b.currentState;
+    }
+
+    float readFloat(XrAction action, XrPath sub) {
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = action;
+        gi.subactionPath = sub;
+        XrActionStateFloat f{XR_TYPE_ACTION_STATE_FLOAT};
+        xrGetActionStateFloat(session_, &gi, &f);
+        return f.isActive ? f.currentState : 0;
+    }
+
+    // Controls (Touch):
+    //   trigger = click / drag · grip = grab the window under the ray and move it (Alt+drag)
+    //   A / X = right click · B / Y = virtual keyboard (with dictation)
+    //   stick ↑↓ = scroll · stick ←→ = spin the 360° desktop · stick click: left = passthrough, right = recenter
     void handleInput(XrTime time) {
         XrActiveActionSet active{actionSet_, XR_NULL_PATH};
         XrActionsSyncInfo si{XR_TYPE_ACTIONS_SYNC_INFO};
         si.countActiveActionSets = 1;
         si.activeActionSets = &active;
         if (XR_FAILED(xrSyncActions(session_, &si))) return;
+        auto now = std::chrono::steady_clock::now();
 
         for (int i = 0; i < 2; ++i) {
             Hand& h = hands_[i];
-            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
-            gi.subactionPath = h.path;
-
             XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
             h.active = XR_SUCCEEDED(xrLocateSpace(h.aimSpace, local_, time, &loc)) &&
                        (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
                        (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
             if (h.active) {
                 h.origin = {loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
-                h.dir = rotate(loc.pose.orientation, {0, 0, -1});
+                // Low-pass the ray direction: hand tremor at 1.8 m is several pixels.
+                Vec3 raw = rotate(loc.pose.orientation, {0, 0, -1});
+                Vec3 m = h.smoothDir * 0.55f + raw * 0.45f;
+                float len = std::sqrt(m.x * m.x + m.y * m.y + m.z * m.z);
+                h.smoothDir = len > 0 ? m * (1 / len) : raw;
+                h.dir = h.smoothDir;
             }
 
-            XrActionStateFloat f{XR_TYPE_ACTION_STATE_FLOAT};
-            gi.action = triggerAction_;
-            xrGetActionStateFloat(session_, &gi, &f);
-            bool trigger = f.isActive && f.currentState > (h.trigger ? 0.4f : 0.7f);
-            gi.action = gripAction_;
-            f = {XR_TYPE_ACTION_STATE_FLOAT};
-            xrGetActionStateFloat(session_, &gi, &f);
-            bool grip = f.isActive && f.currentState > (h.grip ? 0.4f : 0.7f);
-            if ((trigger && !h.trigger) || (grip && !h.grip)) {
+            float tv = readFloat(triggerAction_, h.path), gv = readFloat(gripAction_, h.path);
+            bool trigger = tv > (h.trigger ? 0.4f : 0.7f);
+            bool grip = gv > (h.grip ? 0.4f : 0.7f);
+            bool rightClick = readBool(rightClickAction_, h.path);
+            bool pressed = (trigger && !h.trigger) || (grip && !h.grip) || (rightClick && !h.rightClick);
+            if (pressed) {
                 activeHand_ = i;
                 haptic(i);
+                h.lockUntil = now + std::chrono::milliseconds(140);
+                h.lockU = h.u;
+                h.lockV = h.v;
             }
             h.trigger = trigger;
             h.grip = grip;
+            h.rightClick = rightClick;
 
-            XrActionStateBoolean bstate{XR_TYPE_ACTION_STATE_BOOLEAN};
-            gi.action = primaryAction_;
-            xrGetActionStateBoolean(session_, &gi, &bstate);
-            if (bstate.currentState && !h.primaryPrev) togglePassthrough();
-            h.primaryPrev = bstate.currentState;
-            bstate = {XR_TYPE_ACTION_STATE_BOOLEAN};
-            gi.action = secondaryAction_;
-            xrGetActionStateBoolean(session_, &gi, &bstate);
-            if (bstate.currentState && !h.secondaryPrev) layoutValid_ = false;  // recenter next frame
-            h.secondaryPrev = bstate.currentState;
+            bool kb = readBool(keyboardAction_, h.path);
+            if (kb && !h.keyboardPrev) {
+                if (kbVisible_) kbVisible_ = false;
+                else openKeyboard(time);
+            }
+            h.keyboardPrev = kb;
+
+            bool stickClick = readBool(stickClickAction_, h.path);
+            if (stickClick && !h.stickClickPrev) {
+                if (i == 0) togglePassthrough();
+                else layoutValid_ = false;  // recenter next frame
+            }
+            h.stickClickPrev = stickClick;
 
             // Thumbstick left/right flick: spin the 360° desktop by 30° (no need to turn around).
-            XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
             gi.action = stickAction_;
+            gi.subactionPath = h.path;
+            XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
             xrGetActionStateVector2f(session_, &gi, &stick);
             bool flick = stick.isActive && std::fabs(stick.currentState.x) > 0.7f && std::fabs(stick.currentState.y) < 0.5f;
             if (flick && !h.stickXPrev && layoutValid_) {
@@ -896,10 +1015,18 @@ private:
             }
             h.stickXPrev = flick;
 
-            // Hit test in layout space.
+            // Hit test: keyboard first (it is closer), then the desktop cylinder.
             h.hit = false;
             h.hitDisplay = -1;
-            if (h.active && layoutValid_) {
+            h.onKeyboard = false;
+            float ku, kv;
+            Vec3 khit{};
+            if (h.active && hitKeyboard(h, ku, kv, khit)) {
+                h.hit = h.onKeyboard = true;
+                h.u = ku;
+                h.v = kv;
+                h.hitPoint = khit;
+            } else if (h.active && layoutValid_) {
                 Vec3 o = transformPoint(layoutInv_, h.origin), dl = transformDir(layoutInv_, h.dir), pt{};
                 if (intersect(o, dl, pt)) {
                     float theta = std::atan2(pt.x, -pt.z);
@@ -920,14 +1047,27 @@ private:
             }
         }
 
-        // Only the active hand drives the X pointer.
+        // Only the active hand drives the X pointer / keyboard.
         Hand& h = hands_[activeHand_];
-        if (!h.hit) return;
-        int buttons = (h.trigger ? 1 : 0) | (h.grip ? 4 : 0);
+        if (h.onKeyboard) {
+            jint r = env_->CallIntMethod(activity_, onKeyboardPointer_, h.u, h.v, (jboolean)h.trigger);
+            if (r & 1) haptic(activeHand_, 0.12f, 8'000'000);
+            if (r & 2) kbVisible_ = false;
+            keyboardHovered_ = true;
+            return;
+        }
+        if (keyboardHovered_) {
+            env_->CallIntMethod(activity_, onKeyboardPointer_, -1.f, -1.f, (jboolean)false);
+            keyboardHovered_ = false;
+        }
+        if (h.hitDisplay < 0) return;
+        float u = h.u, v = h.v;
+        if (now < h.lockUntil && h.hitDisplay == lastPointerDisplay_) { u = h.lockU; v = h.lockV; }
+        int buttons = (h.trigger ? 1 : 0) | (h.rightClick ? 4 : 0) | (h.grip ? kMoveWindow : 0);
         const auto& sc = screens_[h.hitDisplay];
-        int px = (int)(h.u * sc.width), py = (int)(h.v * sc.height);
+        int px = (int)(u * sc.width), py = (int)(v * sc.height);
         if (h.hitDisplay != lastPointerDisplay_ || px != lastPx_ || py != lastPy_ || buttons != lastButtons_) {
-            env_->CallVoidMethod(activity_, onPointer_, h.hitDisplay, h.u, h.v, buttons);
+            env_->CallVoidMethod(activity_, onPointer_, h.hitDisplay, u, v, buttons);
             lastPointerDisplay_ = h.hitDisplay; lastPx_ = px; lastPy_ = py; lastButtons_ = buttons;
         }
 
@@ -936,17 +1076,16 @@ private:
         gi.subactionPath = h.path;
         XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
         xrGetActionStateVector2f(session_, &gi, &stick);
-        auto now = std::chrono::steady_clock::now();
         if (stick.isActive && std::fabs(stick.currentState.y) > 0.6f && now - lastScroll_ > std::chrono::milliseconds(90)) {
-            env_->CallVoidMethod(activity_, onScroll_, h.hitDisplay, h.u, h.v, (jboolean)(stick.currentState.y > 0));
+            env_->CallVoidMethod(activity_, onScroll_, h.hitDisplay, u, v, (jboolean)(stick.currentState.y > 0));
             lastScroll_ = now;
         }
     }
 
-    void haptic(int hand) {
+    void haptic(int hand, float amplitude = 0.25f, XrDuration duration = 15'000'000) {
         XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION};
-        v.amplitude = 0.25f;
-        v.duration = 15'000'000;  // 15 ms
+        v.amplitude = amplitude;
+        v.duration = duration;
         v.frequency = XR_FREQUENCY_UNSPECIFIED;
         XrHapticActionInfo hi{XR_TYPE_HAPTIC_ACTION_INFO};
         hi.action = hapticAction_;

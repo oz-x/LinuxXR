@@ -10,7 +10,7 @@ usage() {
   cat <<USAGE
 linuxxr gpu build      Compila Mesa $MESA_VERSION con Turnip (KGSL, Adreno 740) + Zink en $MESA_PREFIX
 linuxxr gpu status     Muestra el renderer Vulkan/OpenGL activo
-linuxxr agents install <claude|codex|gemini>...   Instala CLIs de agentes (npm global)
+linuxxr agents install <claude|omp|codex|gemini>...   Instala CLIs de agentes
 linuxxr token          Muestra el token del puente de agentes (agentd)
 linuxxr tunnel <usuario@host> [puerto]   Publica agentd en un servidor remoto por SSH (-R)
 USAGE
@@ -52,17 +52,18 @@ case "${1:-}" in
   agents)
     [ "${2:-}" = install ] || { usage; exit 1; }
     shift 2
-    [ $# -gt 0 ] || set -- claude codex gemini
+    [ $# -gt 0 ] || set -- claude omp codex gemini
     pkgs=()
     for a in "$@"; do
       case "$a" in
-        claude) pkgs+=(@anthropic-ai/claude-code) ;;
+        claude) curl -fsSL https://claude.ai/install.sh | bash ;;   # native build (~/.local/bin)
+        omp) curl -fsSL https://omp.sh/install | sh ;;              # oh my pi (~/.local/bin)
         codex) pkgs+=(@openai/codex) ;;
         gemini) pkgs+=(@google/gemini-cli) ;;
         *) echo "agente desconocido: $a" >&2; exit 1 ;;
       esac
     done
-    npm install -g "${pkgs[@]}" ;;
+    [ ${#pkgs[@]} -eq 0 ] || npm install -g "${pkgs[@]}" ;;
   token) cat /etc/linuxxr/agent-token; echo ;;
   tunnel)
     host="${2:?usuario@host}"; port="${3:-7777}"

@@ -1,6 +1,14 @@
 package com.linuxxr.ui
 
+import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.opengl.GLUtils
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import java.util.Locale
 import android.opengl.GLES30
 import android.os.Bundle
 import android.view.KeyEvent
@@ -25,6 +33,11 @@ class ImmersiveActivity : Activity() {
     private var buttons = 0
     private var renderThread: Thread? = null
     @Volatile private var ringRequested = false
+    private var altHeld = false
+    private val keyboard = VrKeyboard()
+    private var keyboardTex = 0
+    private var keyboardUploaded = false
+    private var recognizer: SpeechRecognizer? = null
 
     /**
      * One GL texture per [TILE_W]-wide column of a display. These are only staging copies: the
@@ -67,6 +80,7 @@ class ImmersiveActivity : Activity() {
     }
 
     override fun onDestroy() {
+        recognizer?.destroy()
         nativeRequestExit()
         renderThread?.join(3000)
         connections.forEach { it.close() }
@@ -142,12 +156,139 @@ class ImmersiveActivity : Activity() {
         return dirtyMask
     }
 
+    /**
+     * Pointer from the controller ray. [mask] uses RFB button bits plus [MOVE_WINDOW]: while set,
+     * Alt is held so xfwm4 drags the window under the ray (grab with grip, anywhere in 360°).
+     */
     @Suppress("unused")
     fun onPointer(index: Int, u: Float, v: Float, mask: Int) {
         val c = connections.getOrNull(index)?.client ?: return
         focusedDisplay = index
-        buttons = mask
-        c.sendPointer(mask, (u * c.width).toInt(), (v * c.height).toInt())
+        val moving = mask and MOVE_WINDOW != 0
+        if (moving != altHeld) {
+            if (moving) c.sendKey(KeySyms.ALT_L, true)
+            altHeld = moving
+            if (!moving) {
+                c.sendPointer(0, (u * c.width).toInt(), (v * c.height).toInt())
+                c.sendKey(KeySyms.ALT_L, false)
+            }
+        }
+        buttons = (mask and 0xff) or (if (moving) 1 else 0)
+        c.sendPointer(buttons, (u * c.width).toInt(), (v * c.height).toInt())
+    }
+
+    // ---- virtual keyboard (quad layer) --------------------------------------------------------
+
+    /** Returns `[texId, width, height, dirty]` for the keyboard bitmap, uploading it if it changed. */
+    @Suppress("unused")
+    fun onKeyboardFrame(): IntArray {
+        val changed = keyboard.render()
+        if (keyboardTex == 0) {
+            val ids = IntArray(1)
+            GLES30.glGenTextures(1, ids, 0)
+            keyboardTex = ids[0]
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, keyboardTex)
+            GLES30.glTexStorage2D(GLES30.GL_TEXTURE_2D, 1, GLES30.GL_SRGB8_ALPHA8, VrKeyboard.WIDTH, VrKeyboard.HEIGHT)
+        }
+        val upload = changed || !keyboardUploaded
+        if (upload) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, keyboardTex)
+            GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, keyboard.bitmap)
+            keyboardUploaded = true
+        }
+        return intArrayOf(keyboardTex, VrKeyboard.WIDTH, VrKeyboard.HEIGHT, if (upload) 1 else 0)
+    }
+
+    /** Ray on the keyboard; returns VrKeyboard.pointer flags (1 haptic, 2 close, 4 dictation). */
+    @Suppress("unused")
+    fun onKeyboardPointer(u: Float, v: Float, down: Boolean): Int {
+        if (u < 0f) {
+            keyboard.leave()
+            return 0
+        }
+        val r = keyboard.pointer(u, v, down, connections.getOrNull(focusedDisplay)?.client)
+        if (r and 4 != 0) runOnUiThread { toggleDictation() }
+        return r and 3
+    }
+
+    // ---- dictation (Horizon OS speech recognizer, types into the focused display) -------------
+
+    private fun toggleDictation() {
+        if (recognizer != null) {
+            stopDictation()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            keyboard.status = "Falta permiso de micrófono: concédelo en el panel de LinuxXR"
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            keyboard.status = "El reconocimiento de voz no está disponible en este visor"
+            return
+        }
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply { setRecognitionListener(dictationListener) }
+        keyboard.dictating = true
+        keyboard.status = "Escuchando…"
+        listen()
+    }
+
+    private fun listen() {
+        recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        })
+    }
+
+    private fun stopDictation() {
+        recognizer?.destroy()
+        recognizer = null
+        keyboard.dictating = false
+        keyboard.status = "Dictado detenido"
+    }
+
+    private val dictationListener = object : RecognitionListener {
+        override fun onPartialResults(partial: Bundle) {
+            partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                ?.takeIf { it.isNotBlank() }?.let { keyboard.status = it }
+        }
+
+        override fun onResults(results: Bundle) {
+            val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+            if (text.isNotBlank()) {
+                typeText("$text ")
+                keyboard.status = "✓ $text"
+            }
+            if (recognizer != null) listen()  // continuous until the 🎤 key is pressed again
+        }
+
+        override fun onError(error: Int) {
+            when (error) {
+                // Silence: just keep listening.
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> if (recognizer != null) listen()
+                else -> {
+                    stopDictation()
+                    keyboard.status = "Error de dictado ($error)"
+                }
+            }
+        }
+
+        override fun onReadyForSpeech(params: Bundle?) { keyboard.status = "Escuchando…" }
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() {}
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+    }
+
+    private fun typeText(text: String) {
+        val c = connections.getOrNull(focusedDisplay)?.client ?: return
+        text.codePoints().forEach {
+            val sym = KeySyms.forCodePoint(it)
+            c.sendKey(sym, true)
+            c.sendKey(sym, false)
+        }
     }
 
     @Suppress("unused")
@@ -184,6 +325,8 @@ class ImmersiveActivity : Activity() {
         private const val MONITOR_W = 1440
         private const val MONITOR_H = 1200
         private const val TILE_W = MONITOR_W
+        /** Extra pointer bit from native: grip held = move the window (Alt + drag). */
+        private const val MOVE_WINDOW = 0x100
 
         init {
             System.loadLibrary("linuxxr_xr")

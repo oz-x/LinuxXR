@@ -9,7 +9,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 
-/** Downloads, verifies and unpacks the pinned Arch Linux ARM rootfs. */
+/** Downloads, verifies and unpacks the pinned Linux rootfs (see [Rootfs]). */
 class RootfsInstaller(private val guest: Guest, private val cacheDir: File) {
 
     fun interface Progress {
@@ -17,7 +17,7 @@ class RootfsInstaller(private val guest: Guest, private val cacheDir: File) {
     }
 
     fun install(progress: Progress) {
-        val archive = File(cacheDir, "archlinux-aarch64.tar.xz")
+        val archive = File(cacheDir, "rootfs.tar.xz")
         if (!archive.exists() || sha256(archive) != Rootfs.SHA256) {
             download(archive, progress)
             progress.report("Verificando SHA-256…", null)
@@ -28,11 +28,12 @@ class RootfsInstaller(private val guest: Guest, private val cacheDir: File) {
             }
         }
         val staging = File(guest.rootfs.parentFile, "rootfs.partial")
-        staging.deleteRecursively()
+        forceDelete(staging)
         staging.mkdirs()
         extract(archive, staging, progress)
-        guest.rootfs.deleteRecursively()
+        forceDelete(guest.rootfs)
         if (!staging.renameTo(guest.rootfs)) throw IOException("No se pudo activar el rootfs")
+        guest.markInstalled()
         archive.delete()
         progress.report("Rootfs instalado", 1f)
     }
@@ -61,7 +62,7 @@ class RootfsInstaller(private val guest: Guest, private val cacheDir: File) {
                     done += n
                     if (done - lastReport > (1 shl 20)) {
                         lastReport = done
-                        progress.report("Descargando Arch Linux ARM… ${done shr 20} MiB", total?.let { done.toFloat() / it })
+                        progress.report("Descargando Debian… ${done shr 20} MiB", total?.let { done.toFloat() / it })
                     }
                 }
             }
@@ -113,6 +114,25 @@ class RootfsInstaller(private val guest: Guest, private val cacheDir: File) {
             }
         }
         for ((dir, mode) in dirModes.asReversed()) Os.chmod(dir.path, mode)
+    }
+
+    /**
+     * Deletes a guest tree even where packages left directories read-only or unreadable to the
+     * app's real uid (e.g. 0555 or 0000 dirs): restore owner rwx on the way down.
+     */
+    private fun forceDelete(dir: File) {
+        if (!dir.exists() && !java.nio.file.Files.isSymbolicLink(dir.toPath())) return
+        fun walk(f: File) {
+            if (java.nio.file.Files.isSymbolicLink(f.toPath()) || !f.isDirectory) {
+                f.delete()
+                return
+            }
+            runCatching { Os.chmod(f.path, 0b111_000_000) }
+            f.listFiles()?.forEach(::walk)
+            f.delete()
+        }
+        walk(dir)
+        if (dir.exists()) throw IOException("No se pudo borrar ${dir.path}")
     }
 
     private fun stripTop(name: String): String? {

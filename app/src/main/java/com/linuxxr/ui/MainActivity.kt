@@ -24,7 +24,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/** Control panel: install/start/stop the Arch guest, open desktop panels, agent bridge info. */
+/** Control panel: install/start/stop the Linux guest, open desktop panels, agent bridge info. */
 class MainActivity : Activity() {
 
     private var scope: CoroutineScope? = null
@@ -90,7 +90,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad, pad, pad)
             setBackgroundColor(Color.rgb(18, 18, 24))
             addView(text(24f, bold = true).apply { this.text = "LinuxXR" })
-            addView(text(14f).apply { this.text = "Arch Linux ARM con GPU para agentes de IA · Meta Quest 3" })
+            addView(text(14f).apply { this.text = "Debian + KDE Plasma con GPU para agentes de IA · Meta Quest 3" })
             addView(status)
             addView(progress, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(displayRow)
@@ -103,6 +103,9 @@ class MainActivity : Activity() {
         }
         setContentView(root)
         setDisplays(displays)
+        // Debug hook (adb, headset may be asleep): am start -n com.linuxxr/.ui.MainActivity --ez autostart true
+        if (com.linuxxr.BuildConfig.DEBUG && intent.getBooleanExtra("autostart", false) &&
+            SessionService.state.value !is SessionState.Running) SessionService.start(this, displays, "1920x1080")
     }
 
     override fun onStart() {
@@ -154,7 +157,7 @@ class MainActivity : Activity() {
         desktops.removeAllViews()
         when (state) {
             SessionState.Stopped -> {
-                status.text = if (Guest(this).isInstalled) "Detenido" else "Arch Linux ARM no instalado (se descargarán ~164 MB)"
+                status.text = if (Guest(this).isInstalled) "Detenido" else "Debian + KDE Plasma no instalado (se descargarán ~35 MB y luego paquetes)"
                 startStop.text = "Iniciar Linux"
             }
             is SessionState.Working -> {

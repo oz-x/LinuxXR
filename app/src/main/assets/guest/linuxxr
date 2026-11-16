@@ -18,9 +18,11 @@ USAGE
 
 gpu_build() {
   [ -e /dev/kgsl-3d0 ] || echo "aviso: /dev/kgsl-3d0 no visible; el build seguirá, pero Turnip no podrá abrir la GPU" >&2
-  pacman -S --noconfirm --needed base-devel meson ninja python-mako python-yaml python-packaging \
-    glslang libdrm libx11 libxext libxfixes libxcb libxshmfence libxxf86vm libxrandr \
-    libglvnd xorgproto expat zlib zstd libdisplay-info flex bison
+  apt-get install -y build-essential meson ninja-build pkg-config python3-mako python3-yaml python3-packaging \
+    glslang-tools libdrm-dev libx11-dev libxext-dev libxfixes-dev libx11-xcb-dev libxcb1-dev libxcb-dri3-dev \
+    libxcb-present-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libxcb-glx0-dev libxcb-dri2-0-dev \
+    libxcb-sync-dev libxshmfence-dev libxxf86vm-dev libxrandr-dev libglvnd-dev x11proto-dev libexpat1-dev \
+    zlib1g-dev libzstd-dev libdisplay-info-dev flex bison
   local work=/var/cache/linuxxr/mesa
   mkdir -p "$work" && cd "$work"
   if [ ! -d "mesa-$MESA_VERSION" ]; then

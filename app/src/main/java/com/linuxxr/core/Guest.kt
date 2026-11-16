@@ -6,11 +6,16 @@ import android.system.Os
 import java.io.File
 import java.net.Inet4Address
 
-/** Pinned Arch Linux ARM rootfs (proot-distro build, aarch64). */
+/**
+ * Pinned Debian 13 "trixie" rootfs (proot-distro build, aarch64). Debian rather than Arch because
+ * it still ships KDE Plasma's X11 session; Plasma on Arch is Wayland-only, which needs a GPU
+ * DRM/GBM device Android does not give apps.
+ */
 object Rootfs {
-    const val URL = "https://github.com/termux/proot-distro/releases/download/v4.34.2/archlinux-aarch64-pd-v4.34.2.tar.xz"
-    const val SHA256 = "dabc2382ddcb725969cf7b9e2f3b102ec862ea6e0294198a30c71e9a4b837f81"
-    const val TOP_DIR = "archlinux-aarch64"
+    const val ID = "debian-trixie"
+    const val URL = "https://github.com/termux/proot-distro/releases/download/v4.29.0/debian-trixie-aarch64-pd-v4.29.0.tar.xz"
+    const val SHA256 = "3834a11cbc6496935760bdc20cca7e2c25724d0cd8f5e4926da8fd5ca1857918"
+    const val TOP_DIR = "debian-trixie-aarch64"
 }
 
 /** Layout of LinuxXR state inside the app's private storage, and the PRoot launcher. */
@@ -22,7 +27,13 @@ class Guest(private val context: Context) {
     private val shm = File(base, "shm")
     private val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
 
-    val isInstalled: Boolean get() = File(rootfs, "usr/bin/bash").exists() || File(rootfs, "usr/bin/pacman").exists()
+    private val rootfsId = File(base, "rootfs.id")
+
+    /** Installed and of the pinned distro (an older Arch rootfs counts as not installed). */
+    val isInstalled: Boolean
+        get() = File(rootfs, "usr/bin/bash").exists() && rootfsId.isFile && rootfsId.readText() == Rootfs.ID
+
+    fun markInstalled() = rootfsId.writeText(Rootfs.ID)
 
     /** Host path of the VNC socket that Xvnc for display [n] creates at /run/linuxxr/display-n.sock. */
     fun displaySocket(n: Int) = File(rootfs, "run/linuxxr/display-$n.sock")
@@ -36,7 +47,7 @@ class Guest(private val context: Context) {
 
     /** Refreshes host-derived files and LinuxXR's guest scripts. Safe to call on every start. */
     fun prepare() {
-        // pacman's `filesystem` package makes / mode 0555; the real owner (this app) needs to write there.
+        // Packages may leave / at mode 0555; the real owner (this app) needs to write there.
         Os.chmod(rootfs.path, 0b111_101_101)
         // .l2s must exist for --link2symlink (hard link emulation) to work.
         listOf(prootTmp, sysdata, shm, File(rootfs, ".l2s"), File(rootfs, "tmp"), File(rootfs, "run/linuxxr"), File(rootfs, "root"))
@@ -94,7 +105,6 @@ class Guest(private val context: Context) {
             "session.sh" to "usr/local/lib/linuxxr/session.sh",
             "agentd.py" to "usr/local/lib/linuxxr/agentd.py",
             "linuxxr" to "usr/local/bin/linuxxr",
-            "bwrap-shim" to "usr/local/bin/bwrap",
             "linuxxr-gpu.sh" to "etc/profile.d/linuxxr-gpu.sh",
         )
         for ((asset, target) in targets) {
@@ -106,7 +116,7 @@ class Guest(private val context: Context) {
         }
     }
 
-    /** Android hides several /proc files from apps; tools like top, node and pacman read them. */
+    /** Android hides several /proc files from apps; tools like top, node and apt read them. */
     private fun writeFakeProcFiles() {
         val cpus = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         val cpuRow = "120 0 300 12000 20 10 5 8 0 0"
@@ -148,7 +158,7 @@ class Guest(private val context: Context) {
         false
     }
 
-    /** Builds a process that runs [command] as root inside the Arch guest. */
+    /** Builds a process that runs [command] as root inside the Linux guest. */
     fun process(vararg command: String): ProcessBuilder {
         val proot = File(nativeLibDir, "libproot.so").path
         val args = mutableListOf(

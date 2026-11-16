@@ -1,70 +1,31 @@
 #!/bin/bash
-# LinuxXR first-boot provisioning for Arch Linux ARM (runs inside PRoot as fake root).
+# LinuxXR first-boot provisioning for Debian 13 "trixie" (runs inside PRoot as fake root).
+# Debian is used because it still ships KDE Plasma with its X11 session (KWin X11): Plasma on
+# Arch is Wayland-only, and Wayland compositors need a DRM/GBM GPU Android does not expose.
 set -euo pipefail
-MARKER=/var/lib/linuxxr/provisioned-v1
-KDE_MARKER=/var/lib/linuxxr/kde-v1
+MARKER=/var/lib/linuxxr/provisioned-debian-v1
+[ -e "$MARKER" ] && { echo "[linuxxr] ya aprovisionado"; exit 0; }
 
+export DEBIAN_FRONTEND=noninteractive
+# apt cannot drop privileges to _apt under PRoot's fake root.
+echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/01linuxxr-sandbox
+printf 'APT::Install-Recommends "false";\n' > /etc/apt/apt.conf.d/02linuxxr-norecommends
 
-# KDE apps and look on top of the X11 session (Plasma 6.8 on Arch ARM is Wayland-only, and
-# LinuxXR's 360° VR desktop, transparency and agent control are X11-based).
-install_kde() {
-  echo "[linuxxr] instalando aplicaciones y tema KDE"
-  pacman -S --noconfirm --needed konsole dolphin kate ark gwenview okular spectacle \
-    breeze breeze-gtk breeze-icons plasma-integration kde-cli-tools
-  mkdir -p /root/.config/xfce4
-  # KDE apps as defaults for the panel launchers and "open terminal/file manager".
-  printf 'TerminalEmulator=konsole\nFileManager=dolphin\n' > /root/.config/xfce4/helpers.rc
-  touch "$KDE_MARKER"
-}
+echo "[linuxxr] actualizando Debian"
+apt-get update
+apt-get -y full-upgrade
 
-# Installs made before hard-link emulation worked (missing .l2s dir) lost hard-linked files
-# (gcc, perl, git…). Reinstall any package with missing files, once.
-REPAIR_MARKER=/var/lib/linuxxr/repair-hardlinks-v1
-repair_packages() {
-  local broken
-  broken=$(pacman -Qk 2>/dev/null | grep -v ' 0 missing' | cut -d: -f1 | sort -u || true)
-  if [ -n "$broken" ]; then
-    echo "[linuxxr] reparando paquetes con archivos perdidos: $broken"
-    pacman -S --noconfirm $broken
-  fi
-  touch "$REPAIR_MARKER"
-}
-
-if [ -e "$MARKER" ]; then
-  [ -e "$REPAIR_MARKER" ] || repair_packages
-  [ -e "$KDE_MARKER" ] || install_kde
-  echo "[linuxxr] ya aprovisionado"
-  exit 0
-fi
-
-echo "[linuxxr] configurando pacman"
-# PRoot cannot really drop privileges to the alpm download user.
-sed -i 's/^DownloadUser/#DownloadUser/' /etc/pacman.conf
-# The geo-redirector (mirror.archlinuxarm.org) can hand out stale mirrors whose databases
-# reference packages that no longer exist (404). Pin current mirrors, redirector last.
-cat > /etc/pacman.d/mirrorlist <<'MIRRORS'
-Server = http://de.mirror.archlinuxarm.org/$arch/$repo
-Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
-Server = http://ca.us.mirror.archlinuxarm.org/$arch/$repo
-Server = http://dk.mirror.archlinuxarm.org/$arch/$repo
-Server = http://mirror.archlinuxarm.org/$arch/$repo
-MIRRORS
-if [ ! -s /etc/pacman.d/gnupg/trustdb.gpg ]; then
-  pacman-key --init
-  pacman-key --populate archlinuxarm
-fi
-
-echo "[linuxxr] actualizando sistema e instalando escritorio y herramientas de agentes"
-pacman -Syyu --noconfirm --needed \
-  base-devel git curl openssh sudo which nano less \
-  tigervnc xorg-xauth xorg-xrandr xorg-xdpyinfo dbus \
-  xfce4 \
+echo "[linuxxr] instalando KDE Plasma (X11), escritorio remoto y herramientas de agentes"
+apt-get -y install \
+  kde-plasma-desktop plasma-workspace kwin-x11 plasma-integration breeze breeze-gtk-theme \
+  konsole dolphin kate ark gwenview okular kde-spectacle systemsettings \
+  tigervnc-standalone-server tigervnc-tools dbus-x11 x11-xserver-utils x11-utils \
   xdotool scrot xclip \
-  python python-pillow \
-  nodejs npm \
-  chromium \
+  python3 python3-pil \
+  nodejs npm chromium \
   mesa-utils vulkan-tools \
-  ttf-dejavu noto-fonts
+  build-essential git curl ca-certificates openssh-client sudo nano less locales \
+  fonts-noto-core fonts-dejavu-core
 
 mkdir -p /etc/linuxxr /var/lib/linuxxr /root/.config
 if [ ! -s /etc/linuxxr/agent-token ]; then
@@ -72,10 +33,11 @@ if [ ! -s /etc/linuxxr/agent-token ]; then
   chmod 600 /etc/linuxxr/agent-token
 fi
 # Chromium cannot use its namespace sandbox inside PRoot.
-echo '--no-sandbox' > /etc/chromium-flags.conf 2>/dev/null || true
-mkdir -p /root/.config && echo '--no-sandbox' > /root/.config/chromium-flags.conf
+mkdir -p /etc/chromium.d
+echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox"' > /etc/chromium.d/linuxxr
 
-install_kde
-touch "$REPAIR_MARKER"
+echo "[linuxxr] instalando Claude Code y oh my pi (omp)"
+/usr/local/bin/linuxxr agents install claude omp || echo "[linuxxr] aviso: no se pudieron instalar los agentes; reintenta con 'linuxxr agents install claude omp'"
+
 touch "$MARKER"
 echo "[linuxxr] aprovisionamiento completo"

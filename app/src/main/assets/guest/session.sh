@@ -11,27 +11,50 @@ mkdir -p "$RUN" /tmp/.X11-unix
 chmod 1777 /tmp /tmp/.X11-unix
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-# bwrap cannot work under PRoot; point every caller at LinuxXR's pass-through shim and keep
-# pacman from restoring the real binary on upgrades.
-ln -sf /usr/local/bin/bwrap /usr/bin/bwrap
-grep -q '^NoExtract.*usr/bin/bwrap' /etc/pacman.conf || sed -i '/^\[options\]/a NoExtract = usr/bin/bwrap' /etc/pacman.conf
 [ -r /etc/profile.d/linuxxr-gpu.sh ] && . /etc/profile.d/linuxxr-gpu.sh
 
 # Agent CLIs (claude, omp) install to ~/.local/bin; terminals start non-login shells.
 grep -qs 'HOME/.local/bin' /root/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 export PATH="/root/.local/bin:$PATH"
-# Breeze Dark for KDE apps. Without Plasma nothing expands the colour scheme name, so the
-# scheme itself goes into kdeglobals (rewritten each start; cheap and self-healing).
-if [ -r /usr/share/color-schemes/BreezeDark.colors ]; then
-  { cat /usr/share/color-schemes/BreezeDark.colors
-    printf '\n[General]\nColorScheme=BreezeDark\n[Icons]\nTheme=breeze-dark\n[KDE]\nLookAndFeelPackage=org.kde.breezedark.desktop\n'
-  } > /root/.config/kdeglobals
-fi
-# Qt/KDE apps take the KDE platform theme (plasma-integration) and Breeze style everywhere:
-# panel launchers, terminals and agent-started apps alike.
-export QT_QPA_PLATFORMTHEME=kde QT_STYLE_OVERRIDE=Breeze XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6
-printf 'QT_QPA_PLATFORMTHEME=kde\nQT_STYLE_OVERRIDE=Breeze\nXDG_CURRENT_DESKTOP=KDE\nKDE_SESSION_VERSION=6\n' > /etc/environment
-dbus-uuidgen --ensure 2>/dev/null || true   # xfconf/dbus need a machine-id
+
+# KDE Plasma settings for LinuxXR (written every start; Plasma keeps everything else).
+mkdir -p /root/.config
+kwc() { kwriteconfig6 --file "$1" --group "$2" --key "$3" "$4"; }
+kwc kwinrc Compositing Enabled false            # software GL compositing would burn the CPU
+kwc kwinrc MouseBindings CommandAllKey Alt       # grip in VR = Alt+drag moves windows
+kwc ksmserverrc General loginMode emptySession
+kwc kscreenlockerrc Daemon Autolock false
+kwc kscreenlockerrc Daemon LockOnResume false
+kwc kdeglobals KDE LookAndFeelPackage org.kde.breezedark.desktop
+dbus-uuidgen --ensure 2>/dev/null || true   # dbus/KDE need a machine-id
+
+# Plasma's desktop (wallpaper) is painted with the transparency key colour so that, in VR, only
+# windows and panels float over passthrough. Plasma creates one desktop per monitor, and LinuxXR
+# changes the monitor layout (360° ring in VR, panel size otherwise), so re-apply on changes.
+KEY_RGB="1,254,2"
+plasma_key_watcher() {
+  local last=""
+  for _ in $(seq 120); do
+    dbus-send --session --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus \
+      org.freedesktop.DBus.NameHasOwner string:org.kde.plasmashell 2>/dev/null | grep -q true && break
+    sleep 1
+  done
+  while true; do
+    local now
+    now=$(xrandr --listmonitors 2>/dev/null | md5sum)
+    if [ "$now" != "$last" ]; then
+      sleep 2   # let plasmashell create containments for new monitors
+      dbus-send --session --dest=org.kde.plasmashell --type=method_call /PlasmaShell \
+        org.kde.PlasmaShell.evaluateScript "string:desktops().forEach(function(d){d.wallpaperPlugin='org.kde.color';d.currentConfigGroup=['Wallpaper','org.kde.color','General'];d.writeConfig('Color','$KEY_RGB');d.reloadConfig();})" \
+        && last="$now"
+      # Breeze Dark once, after plasmashell has its desktops (earlier it is silently ignored).
+      if [ -n "$last" ] && [ ! -e /var/lib/linuxxr/breezedark-applied-v2 ]; then
+        plasma-apply-lookandfeel -a org.kde.breezedark.desktop >/dev/null 2>&1 && touch /var/lib/linuxxr/breezedark-applied-v2
+      fi
+    fi
+    sleep 3
+  done
+}
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null; wait; }
 trap cleanup EXIT TERM INT
@@ -52,22 +75,11 @@ for i in $(seq 1 "$N"); do
   dbus-daemon --session --nofork --nopidfile --address="$bus" > "$RUN/dbus-$i.log" 2>&1 &
   pids+=($!)
   for _ in $(seq 50); do [ -S "$RUN/bus-$i" ] && break; sleep 0.1; done
-  # No desktop (xfdesktop) on purpose: the bare root window is painted with the transparency
-  # key colour, so in VR only the windows float over passthrough. Panel = taskbar/launcher.
   (
     export DISPLAY=":$i" DBUS_SESSION_BUS_ADDRESS="$bus"
     xsetroot -solid "$ROOT_KEY"
-    # Breeze Dark for GTK/xfwm4 widgets, KDE (Qt) apps follow kdeglobals.
-    xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Breeze-Dark 2>/dev/null
-    xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s breeze-dark 2>/dev/null
-    xfconf-query -c xfwm4 -p /general/theme -n -t string -s Breeze 2>/dev/null
-    # LinuxXR changes the monitor layout (VR ring / panel size): don't pop up the display dialog.
-    xfconf-query -c displays -p /Notify -n -t int -s 0 2>/dev/null
-    xfconf-query -c displays -p /AutoEnableProfiles -n -t bool -s false 2>/dev/null
-    xfsettingsd --replace &
-    # No compositor: xfwm4's compositor paints the root black, hiding the transparency key.
-    xfwm4 --replace --compositor=off &
-    exec xfce4-panel
+    plasma_key_watcher &
+    exec startplasma-x11
   ) > "$RUN/desktop-$i.log" 2>&1 &
   pids+=($!)
   echo "[linuxxr] display :$i listo ($RUN/display-$i.sock)"

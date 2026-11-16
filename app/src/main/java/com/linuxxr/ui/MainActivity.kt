@@ -98,10 +98,6 @@ class MainActivity : Activity() {
             addView(agentInfo)
             addView(copyToken)
             addView(storageButton)
-            addView(Button(this@MainActivity).apply {
-                text = "Añadir acceso directo al inicio"
-                setOnClickListener { pinShortcut() }
-            })
             addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
@@ -128,21 +124,6 @@ class MainActivity : Activity() {
         super.onResume()
         storageButton.text = if (Guest(this).hasSharedStorage) "Carpeta compartida: ~/Quest ✓ (reinicia Linux si acabas de activarla)"
         else "Activar carpeta compartida con el Quest (~/Quest)"
-    }
-
-    /** Asks the Horizon OS launcher to pin a LinuxXR shortcut (the user confirms in the headset). */
-    private fun pinShortcut() {
-        val sm = getSystemService(android.content.pm.ShortcutManager::class.java)
-        if (sm == null || !sm.isRequestPinShortcutSupported) {
-            Toast.makeText(this, "El inicio del Quest no admite accesos directos: fíjala desde la Biblioteca", Toast.LENGTH_LONG).show()
-            return
-        }
-        val info = android.content.pm.ShortcutInfo.Builder(this, "linuxxr-home")
-            .setShortLabel("LinuxXR")
-            .setIcon(android.graphics.drawable.Icon.createWithResource(this, com.linuxxr.R.mipmap.ic_launcher))
-            .setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
-            .build()
-        sm.requestPinShortcut(info, null)
     }
 
     private fun requestSharedStorage() {

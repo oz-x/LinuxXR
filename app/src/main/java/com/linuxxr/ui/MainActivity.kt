@@ -150,6 +150,10 @@ class MainActivity : Activity() {
             is SessionState.Running -> {
                 status.text = "En marcha"
                 startStop.text = "Detener Linux"
+                desktops.addView(Button(this).apply {
+                    text = "Modo VR inmersivo (3D)"
+                    setOnClickListener { startActivity(Intent(this@MainActivity, ImmersiveActivity::class.java)) }
+                })
                 for (n in 1..state.displays) {
                     desktops.addView(Button(this).apply {
                         text = "Abrir escritorio :$n"

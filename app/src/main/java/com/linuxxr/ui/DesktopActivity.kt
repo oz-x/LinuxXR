@@ -4,8 +4,6 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.graphics.Color
-import android.net.LocalSocket
-import android.net.LocalSocketAddress
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -18,6 +16,7 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.linuxxr.core.Guest
+import com.linuxxr.vnc.DisplayConnection
 import com.linuxxr.vnc.KeySyms
 import com.linuxxr.vnc.RfbClient
 
@@ -29,8 +28,7 @@ class DesktopActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val modifierButtons = mutableMapOf<Int, Button>()
     private lateinit var rightClickButton: Button
-    @Volatile private var alive = true
-    @Volatile private var socket: LocalSocket? = null
+    private var connection: DisplayConnection? = null
     private var display = 1
 
     private val resizeRemote = Runnable {
@@ -59,7 +57,8 @@ class DesktopActivity : Activity() {
         desktop.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
             if (r - l != or - ol || b - t != ob - ot) scheduleResize()
         }
-        Thread(::connectLoop, "rfb-$display").start()
+        setStatus("Conectando con :$display…")
+        connection = connect()
     }
 
     private fun scheduleResize() {
@@ -67,34 +66,22 @@ class DesktopActivity : Activity() {
         main.postDelayed(resizeRemote, 400)
     }
 
-    private fun connectLoop() {
-        val path = Guest(this).displaySocket(display).path
-        while (alive) {
-            try {
-                setStatus("Conectando con :$display…")
-                val s = LocalSocket().apply { connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM)) }
-                socket = s
-                val client = RfbClient(s.inputStream, s.outputStream, object : RfbClient.Listener {
-                    override fun onResize(width: Int, height: Int) = desktop.requestRender()
-                    override fun onUpdate() = desktop.requestRender()
-                    override fun onServerCutText(text: String) {
-                        main.post { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("LinuxXR", text)) }
-                    }
-                })
-                client.handshake()
-                desktop.client = client
-                setStatus("")
-                main.post(::scheduleResize)
-                client.run()
-            } catch (e: Exception) {
-                if (alive) setStatus("Sin conexión con :$display (${e.message}). Reintentando…")
-            } finally {
-                desktop.client = null
-                runCatching { socket?.close() }
-            }
-            if (alive) Thread.sleep(2000)
+    private fun connect() = DisplayConnection(Guest(this).displaySocket(display), display, object : DisplayConnection.Listener {
+        override fun onConnected(client: RfbClient) {
+            desktop.client = client
+            setStatus("")
+            main.post(::scheduleResize)
         }
-    }
+        override fun onDisconnected(reason: String) {
+            desktop.client = null
+            setStatus("Sin conexión con :$display ($reason). Reintentando…")
+        }
+        override fun onResize(width: Int, height: Int) = desktop.requestRender()
+        override fun onUpdate() = desktop.requestRender()
+        override fun onServerCutText(text: String) {
+            main.post { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("LinuxXR", text)) }
+        }
+    }).start()
 
     private fun setStatus(text: String) = main.post {
         status.text = text
@@ -157,9 +144,7 @@ class DesktopActivity : Activity() {
     }
 
     override fun onDestroy() {
-        alive = false
-        runCatching { socket?.shutdownInput() }
-        runCatching { socket?.close() }
+        connection?.close()
         super.onDestroy()
     }
 

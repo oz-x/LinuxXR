@@ -51,6 +51,13 @@ object KeySyms {
     /** Keysym for a non-printing key, or null if the key produces a character. */
     fun forKeyCode(keyCode: Int): Int? = special[keyCode]
 
+    /** Keysym for a hardware/IME key event, or null if it has no X equivalent (e.g. BACK). */
+    fun forEvent(event: KeyEvent): Int? {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) return null
+        return forKeyCode(event.keyCode)
+            ?: event.getUnicodeChar(event.metaState).takeIf { it > 0 }?.let(::forCodePoint)
+    }
+
     /** Keysym for a Unicode code point (Latin-1 maps directly, the rest via the 0x01000000 range). */
     fun forCodePoint(cp: Int): Int = when {
         cp == '\n'.code -> RETURN

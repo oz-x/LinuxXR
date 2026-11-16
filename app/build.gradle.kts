@@ -37,6 +37,14 @@ android {
     }
     buildFeatures {
         buildConfig = true
+        prefab = true
+    }
+    // Immersive stereo renderer (OpenXR). PRoot is built separately below.
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.5"
+        }
     }
     packaging {
         // proot and its loader ship as lib*.so so Android extracts them to the
@@ -51,6 +59,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.commons.compress)
     implementation(libs.xz)
+    implementation(libs.openxr.loader)
     testImplementation(libs.junit)
 }
 

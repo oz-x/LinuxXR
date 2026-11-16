@@ -123,10 +123,7 @@ class DesktopView(context: Context) : GLSurfaceView(context) {
 
     private fun key(event: KeyEvent, down: Boolean): Boolean {
         val c = client ?: return false
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) return false
-        val sym = KeySyms.forKeyCode(event.keyCode)
-            ?: event.getUnicodeChar(event.metaState).takeIf { it > 0 }?.let { KeySyms.forCodePoint(it) }
-            ?: return false
+        val sym = KeySyms.forEvent(event) ?: return false
         if (down) pressWithModifiers(c, sym, releaseNow = false) else c.sendKey(sym, false)
         return true
     }

@@ -15,7 +15,8 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 
 # Agent CLIs (claude, omp) install to ~/.local/bin; terminals start non-login shells.
 grep -qs 'HOME/.local/bin' /root/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
-export PATH="/root/.local/bin:$PATH"
+grep -qs '.opencode/bin' /root/.bashrc || echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> /root/.bashrc
+export PATH="/root/.opencode/bin:/root/.local/bin:$PATH"
 
 # Dark GTK theme and icons (XFCE, terminal, Thunar).
 mkdir -p /root/.config/gtk-3.0

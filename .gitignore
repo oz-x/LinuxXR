@@ -5,3 +5,7 @@ local.properties
 *.iml
 .idea/
 .cxx/
+# Never commit credentials (API endpoints/keys live only on the headset)
+api.txt
+*.key
+.env

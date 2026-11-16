@@ -10,7 +10,7 @@ usage() {
   cat <<USAGE
 linuxxr gpu build      Compila Mesa $MESA_VERSION con Turnip (KGSL, Adreno 740) + Zink en $MESA_PREFIX
 linuxxr gpu status     Muestra el renderer Vulkan/OpenGL activo
-linuxxr agents install <claude|omp|codex|gemini>...   Instala CLIs de agentes
+linuxxr agents install <claude|omp|opencode|codex|gemini>...   Instala CLIs de agentes
 linuxxr token          Muestra el token del puente de agentes (agentd)
 linuxxr tunnel <usuario@host> [puerto]   Publica agentd en un servidor remoto por SSH (-R)
 USAGE
@@ -60,6 +60,7 @@ case "${1:-}" in
       case "$a" in
         claude) curl -fsSL https://claude.ai/install.sh | bash ;;   # native build (~/.local/bin)
         omp) curl -fsSL https://omp.sh/install | sh ;;              # oh my pi (~/.local/bin)
+        opencode) curl -fsSL https://opencode.ai/install | bash ;;  # OpenCode (~/.opencode/bin)
         codex) pkgs+=(@openai/codex) ;;
         gemini) pkgs+=(@google/gemini-cli) ;;
         *) echo "agente desconocido: $a" >&2; exit 1 ;;
